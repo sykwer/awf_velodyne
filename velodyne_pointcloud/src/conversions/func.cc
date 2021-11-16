@@ -182,12 +182,16 @@ pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr interpolate(
   auto velocity_report_it = std::lower_bound(
     std::begin(velocity_report_queue), std::end(velocity_report_queue),
     rclcpp::Time(input_pointcloud->points.front().time_stamp, RCL_ROS_TIME),
-    [](const autoware_auto_vehicle_msgs::msg::VelocityReport & x, rclcpp::Time t) { return rclcpp::Time(x.stamp) < t; });
+    [](const autoware_auto_vehicle_msgs::msg::VelocityReport & x, rclcpp::Time t) {
+      return rclcpp::Time(x.header.stamp) < t;
+    });
   velocity_report_it = velocity_report_it == std::end(velocity_report_queue) ? std::end(velocity_report_queue) - 1 : velocity_report_it;
 
   const tf2::Transform tf2_base_link_to_sensor_inv = tf2_base_link_to_sensor.inverse();
   for (const auto & p : input_pointcloud->points) {
-    for (; (velocity_report_it != std::end(velocity_report_queue) - 1 && p.time_stamp > rclcpp::Time(velocity_report_it->stamp).seconds());
+    for (;
+         (velocity_report_it != std::end(velocity_report_queue) - 1 &&
+          p.time_stamp > rclcpp::Time(velocity_report_it->header.stamp).seconds());
          ++velocity_report_it) {
       // std::cout << std::fixed << p.time_stamp << " " << rclcpp::Time(velocity_report_it->stamp).seconds() << std::endl;
     }
@@ -195,7 +199,7 @@ pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr interpolate(
     float v = velocity_report_it->longitudinal_velocity;
     float w = velocity_report_it->heading_rate;
 
-    if (std::fabs(p.time_stamp - rclcpp::Time(velocity_report_it->stamp).seconds()) > 0.1) {
+    if (std::fabs(p.time_stamp - rclcpp::Time(velocity_report_it->header.stamp).seconds()) > 0.1) {
       auto ros_clock = rclcpp::Clock(RCL_ROS_TIME);
       RCLCPP_WARN_STREAM_THROTTLE(rclcpp::get_logger("velodyne_interpolate"), ros_clock, 10000 /* ms */, "velocity_report time_stamp is too late. Cloud not interpolate.");
       v = 0;

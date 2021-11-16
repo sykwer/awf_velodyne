@@ -30,7 +30,8 @@ Interpolate::Interpolate(const rclcpp::NodeOptions & options)
 
   // subscribe
   velocity_report_sub_ = this->create_subscription<autoware_auto_vehicle_msgs::msg::VelocityReport>(
-    "/vehicle/status/velocity_status", 10, std::bind(&Interpolate::processvelocity_report, this, std::placeholders::_1));
+    "/vehicle/status/velocity_status", 10,
+    std::bind(&Interpolate::processVelocityReport, this, std::placeholders::_1));
   velodyne_points_ex_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
     "velodyne_points_ex", rclcpp::SensorDataQoS(), std::bind(&Interpolate::processPoints,this, std::placeholders::_1));
 }
@@ -41,9 +42,13 @@ void Interpolate::processVelocityReport(const autoware_auto_vehicle_msgs::msg::V
 
   while (!velocity_report_queue_.empty()) {
     //for replay rosbag
-    if (rclcpp::Time(velocity_report_queue_.front().stamp) > rclcpp::Time(velocity_report_msg->stamp)) {
+    if (
+      rclcpp::Time(velocity_report_queue_.front().header.stamp) >
+      rclcpp::Time(velocity_report_msg->header.stamp)) {
       velocity_report_queue_.pop_front();
-    } else if (rclcpp::Time(velocity_report_queue_.front().stamp) < rclcpp::Time(velocity_report_msg->stamp) - rclcpp::Duration::from_seconds(1.0)) {
+    } else if (
+      rclcpp::Time(velocity_report_queue_.front().header.stamp) <
+      rclcpp::Time(velocity_report_msg->header.stamp) - rclcpp::Duration::from_seconds(1.0)) {
       velocity_report_queue_.pop_front();
     } else {
       break;
