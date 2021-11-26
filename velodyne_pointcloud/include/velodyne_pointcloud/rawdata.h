@@ -147,6 +147,20 @@ typedef struct raw_packet
   uint8_t status[PACKET_STATUS_SIZE];
 } raw_packet_t;
 
+typedef struct point_elements
+{
+  bool is_valid;              // whether this point is to be added or not
+  float x_coord;              // x coordinate
+  float y_coord;              // y coordinate
+  float z_coord;              // z coordinate
+  uint8_t return_type;        // return type
+  int laser_ring;             // ring
+  uint16_t azimuth_corrected; // azimuth
+  float distance;             // distance
+  float intensity;            // intensity
+  double time_stamp;          // time stamp
+} point_elements_t;
+
 /** \brief Velodyne echo types */
 enum RETURN_TYPE
 {

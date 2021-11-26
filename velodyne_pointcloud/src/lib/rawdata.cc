@@ -53,6 +53,7 @@
 namespace velodyne_rawdata
 {
   inline float SQR(float val) {return val * val;}
+  const int omp_thread_num = 4;
 
 ////////////////////////////////////////////////////////////////////////
 //
@@ -439,8 +440,12 @@ namespace velodyne_rawdata
       if ((config_.min_angle < config_.max_angle && azimuth >= config_.min_angle &&
         azimuth <= config_.max_angle) || (config_.min_angle > config_.max_angle))
       {
-        for (int firing = 0, k = 0; firing < VLP16_FIRINGS_PER_BLOCK; ++firing) {
+        point_elements point_elements[VLP16_FIRINGS_PER_BLOCK][VLP16_SCANS_PER_FIRING];
+#pragma omp parallel for simd num_threads(omp_thread_num)
+        for (int firing = 0; firing < VLP16_FIRINGS_PER_BLOCK; ++firing) {
+          int k = firing * VLP16_SCANS_PER_FIRING * RAW_SCAN_SIZE;
           for (int dsr = 0; dsr < VLP16_SCANS_PER_FIRING; dsr++, k += RAW_SCAN_SIZE) {
+            point_elements[firing][dsr].is_valid = false;
             union two_bytes current_return;
             union two_bytes other_return;
             // Distance extraction.
@@ -506,12 +511,12 @@ namespace velodyne_rawdata
                 const float xy_distance = distance * cos_vert_angle;
 
                 // Use standard ROS coordinate system (right-hand rule).
-                const float x_coord = xy_distance * cos_rot_angle;  // velodyne y
-                const float y_coord = -(xy_distance * sin_rot_angle); // velodyne x
-                const float z_coord = distance * sin_vert_angle;    // velodyne z
+                point_elements[firing][dsr].x_coord = xy_distance * cos_rot_angle;  // velodyne y
+                point_elements[firing][dsr].y_coord = -(xy_distance * sin_rot_angle); // velodyne x
+                point_elements[firing][dsr].z_coord = distance * sin_vert_angle;    // velodyne z
                 const float intensity = current_block.data[k + 2];
 
-                const double time_stamp = (block * 2 + firing) * 55.296 / 1000.0 / 1000.0 +
+                point_elements[firing][dsr].time_stamp = (block * 2 + firing) * 55.296 / 1000.0 / 1000.0 +
                   dsr * 2.304 / 1000.0 / 1000.0 + rclcpp::Time(pkt.stamp).seconds();
 
                 // Determine return type.
@@ -553,16 +558,28 @@ namespace velodyne_rawdata
                   default:
                     return_type = RETURN_TYPE::INVALID;
                 }
+                point_elements[firing][dsr].is_valid = true;
+                point_elements[firing][dsr].return_type = return_type;
+                point_elements[firing][dsr].laser_ring = corrections.laser_ring;
+                point_elements[firing][dsr].azimuth_corrected = azimuth_corrected;
+                point_elements[firing][dsr].intensity = intensity;
                 if (is_invalid_distance) {
-                  data.addPoint(
-                    x_coord, y_coord, z_coord, return_type, corrections.laser_ring,
-                    azimuth_corrected, 0, intensity, time_stamp);
+                  point_elements[firing][dsr].distance = 0;
                 } else {
-                  data.addPoint(
-                    x_coord, y_coord, z_coord, return_type, corrections.laser_ring,
-                    azimuth_corrected, distance, intensity, time_stamp);
+                  point_elements[firing][dsr].distance = distance;
                 }
               }
+            }
+          }
+        }
+        for (int i = 0; i < VLP16_FIRINGS_PER_BLOCK; i++) {
+          for (int j = 0; j < VLP16_SCANS_PER_FIRING; j++) {
+            if (point_elements[i][j].is_valid) {
+              data.addPoint(
+                point_elements[i][j].x_coord, point_elements[i][j].y_coord, point_elements[i][j].z_coord,
+                point_elements[i][j].return_type, point_elements[i][j].laser_ring, point_elements[i][j].azimuth_corrected,
+                point_elements[i][j].distance, point_elements[i][j].intensity, point_elements[i][j].time_stamp
+              );
             }
           }
         }
@@ -648,7 +665,11 @@ namespace velodyne_rawdata
       if ((config_.min_angle < config_.max_angle && azimuth >= config_.min_angle &&
         azimuth <= config_.max_angle) || (config_.min_angle > config_.max_angle))
       {
-        for (uint j = 0, k = 0; j < SCANS_PER_BLOCK; j++, k += RAW_SCAN_SIZE) {
+        point_elements point_elements[SCANS_PER_BLOCK];
+#pragma omp parallel for simd num_threads(omp_thread_num)
+        for (uint j = 0; j < SCANS_PER_BLOCK; j++) {
+          uint k = j * RAW_SCAN_SIZE;
+          point_elements[j].is_valid = false;
           union two_bytes current_return;
           union two_bytes other_return;
           // Distance extraction.
@@ -716,12 +737,12 @@ namespace velodyne_rawdata
               const float xy_distance = distance * cos_vert_angle;
 
               // Use standard ROS coordinate system (right-hand rule).
-              const float x_coord = xy_distance * cos_rot_angle;  // velodyne y
-              const float y_coord = -(xy_distance * sin_rot_angle); // velodyne x
-              const float z_coord = distance * sin_vert_angle;    // velodyne z
+              point_elements[j].x_coord = xy_distance * cos_rot_angle;  // velodyne y
+              point_elements[j].y_coord = -(xy_distance * sin_rot_angle); // velodyne x
+              point_elements[j].z_coord = distance * sin_vert_angle;    // velodyne z
               const float intensity = current_block.data[k + 2];
 
-              const double time_stamp = block * 55.3 / 1000.0 / 1000.0 + j * 2.665 / 1000.0 /
+              point_elements[j].time_stamp = block * 55.3 / 1000.0 / 1000.0 + j * 2.665 / 1000.0 /
                 1000.0 + rclcpp::Time(pkt.stamp).seconds();
 
               // Determine return type.
@@ -763,16 +784,26 @@ namespace velodyne_rawdata
                 default:
                   return_type = RETURN_TYPE::INVALID;
               }
+              point_elements[j].is_valid = true;
+              point_elements[j].return_type = return_type;
+              point_elements[j].laser_ring = corrections.laser_ring;
+              point_elements[j].azimuth_corrected = azimuth_corrected;
+              point_elements[j].intensity = intensity;
               if (is_invalid_distance) {
-                data.addPoint(
-                  x_coord, y_coord, z_coord, return_type, corrections.laser_ring,
-                  azimuth_corrected, 0, intensity, time_stamp);
+                point_elements[j].distance = 0;
               } else {
-                data.addPoint(
-                  x_coord, y_coord, z_coord, return_type, corrections.laser_ring,
-                  azimuth_corrected, distance, intensity, time_stamp);
+                point_elements[j].distance = distance;
               }
             }
+          }
+        }
+        for (int j = 0; j < SCANS_PER_BLOCK; j++) {
+          if (point_elements[j].is_valid) {
+            data.addPoint(
+              point_elements[j].x_coord, point_elements[j].y_coord, point_elements[j].z_coord,
+              point_elements[j].return_type, point_elements[j].laser_ring, point_elements[j].azimuth_corrected,
+              point_elements[j].distance, point_elements[j].intensity, point_elements[j].time_stamp
+            );
           }
         }
       }
