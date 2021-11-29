@@ -42,11 +42,6 @@ pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr extractInvalidNearPoint
   const std::vector<float> & invalid_intensity_array, const size_t num_lasers,
   const size_t points_size_threshold);
 
-pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr interpolate(
-  const pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::ConstPtr & input_pointcloud,
-  const std::deque<autoware_auto_vehicle_msgs::msg::VelocityReport> & velocity_report_queue,
-  const tf2::Transform & tf2_base_link_to_sensor);
-
 pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr sortRingNumber(
   const pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::ConstPtr & input_pointcloud,
   const size_t num_lasers);

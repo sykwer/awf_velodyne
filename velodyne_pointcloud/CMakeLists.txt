@@ -62,18 +62,6 @@ rclcpp_components_register_node(cloud_nodelet
   EXECUTABLE cloud_node
 )
 
-ament_auto_add_library(interpolate_nodelet SHARED
-  src/conversions/interpolate.cc
-  src/conversions/pointcloudXYZIR.cc
-  src/conversions/pointcloudXYZIRADT.cc
-  src/conversions/func.cc)
-target_link_libraries(interpolate_nodelet ${OpenCV_LIBS})
-
-rclcpp_components_register_node(interpolate_nodelet
-  PLUGIN "velodyne_pointcloud::Interpolate"
-  EXECUTABLE interpolate_node
-)
-
 ament_auto_add_library(transform_nodelet SHARED
   src/conversions/transform.cc
   src/conversions/pointcloudXYZIR.cc
