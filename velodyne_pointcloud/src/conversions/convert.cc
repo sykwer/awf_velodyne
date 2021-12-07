@@ -22,6 +22,8 @@
 
 #include <velodyne_pointcloud/func.h>
 
+#include <fstream>
+
 namespace velodyne_pointcloud
 {
 
@@ -58,6 +60,14 @@ Convert::Convert(const rclcpp::NodeOptions & options)
 
   // get path to angles.config file for this device
   std::string calibration_file = this->declare_parameter("calibration", "");
+
+  save_test_vector_ = this->declare_parameter("save_test_vector", false);
+  convert_frame_id_ = 0;
+  // make empty files
+  if (save_test_vector_) {
+    (void)std::ofstream(test_vector_input_file);
+    (void)std::ofstream(test_vector_output_file);
+  }
 
   rcl_interfaces::msg::ParameterDescriptor min_range_desc;
   min_range_desc.name = "min_range";
@@ -217,9 +227,16 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
     _overflow_buffer.pc->width = 0;
     _overflow_buffer.pc->height = 1;
 
-    for (size_t i = 0; i < scanMsg->packets.size(); ++i) {
-      data_->unpack(scanMsg->packets[i], scan_points_xyziradt);
+
+    data_->unpack_all(scanMsg->packets, scan_points_xyziradt);
+
+    // Write input and output to yaml files
+    if (save_test_vector_) {
+      writeInPackets(convert_frame_id_, scanMsg);
+      writeOutPointClouds(convert_frame_id_, scan_points_xyziradt);
+      convert_frame_id_++;
     }
+
     // Remove overflow points and add to overflow buffer for next scan
     int phase = (uint16_t)round(config_.scan_phase*100);
     if (scan_points_xyziradt.pc->points.size() > 0)
@@ -379,6 +396,56 @@ visualization_msgs::msg::MarkerArray Convert::createVelodyneModelMakerMsg(
   }
 
   return marker_array_msg;
+}
+
+/** @brief Write input packets data to yaml file. */
+void Convert::writeInPackets(
+  int frame_id, const velodyne_msgs::msg::VelodyneScan::SharedPtr scan)
+{
+  YAML::Emitter emitter;
+  emitter << YAML::BeginSeq;
+  emitter << YAML::BeginMap;
+  emitter << YAML::Key << "frame_id" << YAML::Value << frame_id;
+  emitter << YAML::Key << "packets" << YAML::Value;
+  emitter << YAML::BeginSeq;
+  for (size_t i = 0; i < scan->packets.size(); i++) {
+    emitter << YAML::BeginMap;
+    emitter << YAML::Key << "packet_id" << YAML::Value << i;
+    std::vector<unsigned> data_vector(std::begin(scan->packets[i].data), std::end(scan->packets[i].data));
+    emitter << YAML::Key << "data" << YAML::Value << YAML::Flow << data_vector;
+    emitter << YAML::EndMap;
+  }
+  emitter << YAML::EndSeq;
+  emitter << YAML::EndMap;
+  emitter << YAML::EndSeq;
+  std::ofstream input_file(test_vector_input_file, std::ios::app);
+  input_file << emitter.c_str() << std::endl;
+  input_file.close();
+}
+
+/** @brief Write output pointclouds data to yaml file. */
+void Convert::writeOutPointClouds(
+  int frame_id, const velodyne_pointcloud::PointcloudXYZIRADT & cloud)
+{
+  YAML::Emitter emitter;
+  emitter << YAML::BeginSeq;
+  emitter << YAML::BeginMap;
+  emitter << YAML::Key << "frame_id" << YAML::Value << frame_id;
+  emitter << YAML::Key << "clouds" << YAML::Value;
+  emitter << YAML::BeginSeq;
+  for (auto it = cloud.pc->begin(), e = cloud.pc->end(); it != e; ++it) {
+    emitter << YAML::Flow;
+    emitter << YAML::BeginSeq;
+    emitter << it->x << it->y << it->z << it->intensity << it->return_type
+      << it->ring << it->azimuth << it->distance << it->time_stamp;
+    emitter << YAML::EndSeq;
+  }
+  emitter << YAML::EndSeq;
+  emitter << YAML::EndMap;
+  emitter << YAML::EndSeq;
+  std::ofstream output_file(test_vector_output_file, std::ios::app);
+  output_file << emitter.c_str() << std::endl;
+  output_file.close();
 }
 
 // looks like this function is never used

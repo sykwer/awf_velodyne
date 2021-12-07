@@ -22,6 +22,7 @@ ament_auto_find_build_dependencies()
 
 find_package(Boost COMPONENTS signals)
 find_package(PCL REQUIRED COMPONENTS common)
+find_package(OpenMP)
 
 # Resolve system dependency on yaml-cpp, which apparently does not
 # provide a CMake find_package() module.
@@ -50,6 +51,13 @@ include_directories(
 # add_subdirectory(src/lib)
 ament_auto_add_library(velodyne_rawdata SHARED src/lib/rawdata.cc src/lib/calibration.cc)
 
+if(OPENMP_FOUND)
+  set_target_properties(velodyne_rawdata PROPERTIES
+    COMPILE_FLAGS ${OpenMP_CXX_FLAGS}
+    LINK_FLAGS ${OpenMP_CXX_FLAGS}
+  )
+endif()
+
 ament_auto_add_library(cloud_nodelet SHARED
   src/conversions/convert.cc
   src/conversions/pointcloudXYZIR.cc
@@ -61,6 +69,13 @@ rclcpp_components_register_node(cloud_nodelet
   PLUGIN "velodyne_pointcloud::Convert"
   EXECUTABLE cloud_node
 )
+
+if(OPENMP_FOUND)
+  set_target_properties(cloud_nodelet PROPERTIES
+    COMPILE_FLAGS ${OpenMP_CXX_FLAGS}
+    LINK_FLAGS ${OpenMP_CXX_FLAGS}
+  )
+endif()
 
 ament_auto_add_library(interpolate_nodelet SHARED
   src/conversions/interpolate.cc

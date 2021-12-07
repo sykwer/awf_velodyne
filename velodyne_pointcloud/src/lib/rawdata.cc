@@ -53,6 +53,7 @@
 namespace velodyne_rawdata
 {
   inline float SQR(float val) {return val * val;}
+  const int omp_thread_num = 4;
 
 ////////////////////////////////////////////////////////////////////////
 //
@@ -379,6 +380,98 @@ namespace velodyne_rawdata
     }
   }
 
+/** @brief calculate azimuth and decide packet type to be unpacked
+   *
+   *  @param packets raw packet
+   *  @param packet_types vector of packet type
+   *  @param azimuth_info vector of azimuth parameters
+   */
+  bool RawData::preprocess_unpack(
+    const std::vector<velodyne_msgs::msg::VelodynePacket> & packets,
+    std::vector<PACKET_TYPE> & packet_types, std::vector<azimuth_info_t> & azimuth_info)
+  {
+    size_t scan_size = packets.size() * SCANS_PER_PACKET;
+    if (packet_types.size() != scan_size || azimuth_info.size() != packets.size()) {
+      RCLCPP_ERROR(
+        node_ptr_->get_logger(), "preprocess_unpack : vector size error");
+      return false;
+    }
+    // initialize
+    std::fill(
+      packet_types.begin(), packet_types.end(),
+      PACKET_TYPE::TYPE_INVALID);
+
+    auto it_pkt = packet_types.begin();
+    for (size_t i = 0; i < packets.size(); ++i, it_pkt += SCANS_PER_PACKET) {
+      RCLCPP_DEBUG_STREAM(
+        node_ptr_->get_logger(), "Received packet, time: " << rclcpp::Time(
+          packets[i].stamp).seconds());
+
+      // calculate azimuth
+      calc_azimuth(packets[i], azimuth_info[i]);
+      // check header
+      check_header(packets[i], it_pkt);
+    }
+    return true;
+  }
+
+/** @brief convert raw packets to point cloud
+   *
+   *  @param pacekts raw packets to unpack
+   *  @param data shared pointer to point cloud (points are appended)
+   */
+  void RawData::unpack_all(
+    const std::vector<velodyne_msgs::msg::VelodynePacket> & packets,
+    DataContainerBase & data)
+  {
+    // preprocess
+    size_t scan_size = packets.size() * SCANS_PER_PACKET;
+    std::vector<PACKET_TYPE> packet_types(scan_size, PACKET_TYPE::TYPE_INVALID);
+    std::vector<azimuth_info_t> azimuth_info(packets.size());
+    if (!preprocess_unpack(packets, packet_types, azimuth_info)) {
+      return;
+    }
+
+    // unpack in parallel
+    std::vector<point_elements_t> point_elements(scan_size);
+#pragma omp parallel for simd num_threads(omp_thread_num)
+    for (size_t i = 0; i < scan_size; ++i) {
+      switch (packet_types[i]) {
+        case PACKET_TYPE::TYPE_DEFAULT:
+          {
+            default_loop_info_t loop_info(i);
+            unpack_default(packets[loop_info.packet_id], point_elements[i], loop_info);
+            break;
+          }
+        case PACKET_TYPE::TYPE_VLP16:
+          {
+            vlp16_loop_info_t loop_info(i, azimuth_info);
+            unpack_vlp16(packets[loop_info.packet_id], point_elements[i], loop_info);
+            break;
+          }
+        case PACKET_TYPE::TYPE_VLS128:
+          {
+            vls128_loop_info_t loop_info(i, azimuth_info);
+            unpack_vls128(packets[loop_info.packet_id], point_elements[i], loop_info);
+            break;
+          }
+        default:
+          break;
+      }
+    }
+
+    // assemble
+    for (size_t i = 0; i < scan_size; ++i) {
+      if (point_elements[i].is_valid) {
+        data.addPoint(
+          point_elements[i].x_coord, point_elements[i].y_coord, point_elements[i].z_coord,
+          point_elements[i].return_type, point_elements[i].laser_ring, point_elements[i].azimuth_corrected,
+          point_elements[i].distance, point_elements[i].intensity, point_elements[i].time_stamp
+        );
+      }
+    }
+  }
+
 /** @brief convert raw VLP16 packet to point cloud
  *
  *  @param pkt raw packet to unpack
@@ -564,6 +657,160 @@ namespace velodyne_rawdata
                 }
               }
             }
+          }
+        }
+      }
+    }
+  }
+
+/** @brief convert raw VLP16 packet to point cloud
+ *
+ *  @param pkt raw packet to unpack
+ *  @param data elements of point (point are appended)
+ *  @param loop_info loop counters
+ */
+  void RawData::unpack_vlp16(
+    const velodyne_msgs::msg::VelodynePacket & pkt,
+    point_elements_t & data, const vlp16_loop_info_t & loop_info)
+  {
+    const raw_packet_t * raw = (const raw_packet_t *) &pkt.data[0];
+    const uint8_t return_mode = pkt.data[1204];
+    const bool dual_return = (return_mode == RETURN_MODE_DUAL);
+    uint block = loop_info.block;
+    int firing = loop_info.firing;
+    int k = loop_info.k;
+    int dsr = loop_info.dsr;
+    uint16_t azimuth = loop_info.azimuth;
+    float azimuth_diff = loop_info.azimuth_diff;
+    // Cache block for use.
+    const raw_block_t & current_block = raw->blocks[block];
+
+    // Condition added to avoid calculating points which are not in the interesting defined area
+    // (min_angle < area < max_angle).
+    if ((config_.min_angle < config_.max_angle && azimuth >= config_.min_angle &&
+      azimuth <= config_.max_angle) || (config_.min_angle > config_.max_angle))
+    {
+      union two_bytes current_return;
+      union two_bytes other_return;
+      // Distance extraction.
+      current_return.bytes[0] = current_block.data[k];
+      current_return.bytes[1] = current_block.data[k + 1];
+
+      if (dual_return) {
+        other_return.bytes[0] = block %
+          2 ? raw->blocks[block - 1].data[k] : raw->blocks[block + 1].data[k];
+        other_return.bytes[1] = block %
+          2 ? raw->blocks[block - 1].data[k + 1] : raw->blocks[block + 1].data[k + 1];
+      }
+      // Do not process if there is no return, or in dual return mode and the first and last echos are the same.
+      if ((current_return.bytes[0] == 0 && current_return.bytes[1] == 0) ||
+        (dual_return && block % 2 && other_return.bytes[0] == current_return.bytes[0] &&
+        other_return.bytes[1] == current_return.bytes[1]))
+      {
+        return;
+      }
+      {
+        velodyne_pointcloud::LaserCorrection & corrections =
+          calibration_.laser_corrections[dsr];
+        float distance = current_return.uint * calibration_.distance_resolution_m;
+        bool is_invalid_distance = false;
+        if (distance < 1e-6) {
+          is_invalid_distance = true;
+          distance = 0.3;
+        } else {
+          distance += corrections.dist_correction;
+        }
+
+        // Correct for the laser rotation as a function of timing during the firings.
+        const float azimuth_corrected_f = azimuth +
+          (azimuth_diff * ((dsr * VLP16_DSR_TOFFSET) + (firing * VLP16_FIRING_TOFFSET)) /
+          VLP16_BLOCK_TDURATION);
+        const uint16_t azimuth_corrected =
+          (static_cast < uint16_t > (round(azimuth_corrected_f))) % 36000;
+
+        // Condition added to avoid calculating points which are not in the interesting defined area
+        // (min_angle < area < max_angle).
+        if ((azimuth_corrected >= config_.min_angle &&
+          azimuth_corrected <= config_.max_angle &&
+          config_.min_angle < config_.max_angle) ||
+          (config_.min_angle > config_.max_angle &&
+          (azimuth_corrected <= config_.max_angle ||
+          azimuth_corrected >= config_.min_angle)))
+        {
+
+          // Convert polar coordinates to Euclidean XYZ.
+          const float cos_vert_angle = corrections.cos_vert_correction;
+          const float sin_vert_angle = corrections.sin_vert_correction;
+          const float cos_rot_correction = corrections.cos_rot_correction;
+          const float sin_rot_correction = corrections.sin_rot_correction;
+
+          const float cos_rot_angle =
+            cos_rot_table_[azimuth_corrected] * cos_rot_correction +
+            sin_rot_table_[azimuth_corrected] * sin_rot_correction;
+          const float sin_rot_angle =
+            sin_rot_table_[azimuth_corrected] * cos_rot_correction -
+            cos_rot_table_[azimuth_corrected] * sin_rot_correction;
+
+          // Compute the distance in the xy plane (w/o accounting for rotation).
+          const float xy_distance = distance * cos_vert_angle;
+
+          // Use standard ROS coordinate system (right-hand rule).
+          data.x_coord = xy_distance * cos_rot_angle;  // velodyne y
+          data.y_coord = -(xy_distance * sin_rot_angle); // velodyne x
+          data.z_coord = distance * sin_vert_angle;    // velodyne z
+          const float intensity = current_block.data[k + 2];
+
+          data.time_stamp = (block * 2 + firing) * 55.296 / 1000.0 / 1000.0 +
+            dsr * 2.304 / 1000.0 / 1000.0 + rclcpp::Time(pkt.stamp).seconds();
+
+          // Determine return type.
+          uint8_t return_type;
+          switch (return_mode) {
+            case RETURN_MODE_DUAL:
+              if ((other_return.bytes[0] == 0 && other_return.bytes[1] == 0) ||
+                (other_return.bytes[0] == current_return.bytes[0] &&
+                other_return.bytes[1] == current_return.bytes[1]))
+              {
+                return_type = RETURN_TYPE::DUAL_ONLY;
+              } else {
+                const float other_intensity = block %
+                  2 ? raw->blocks[block - 1].data[k + 2] : raw->blocks[block + 1].data[k + 2];
+                bool first = other_return.uint < current_return.uint ? 0 : 1;
+                bool strongest = other_intensity < intensity ? 1 : 0;
+                if (other_intensity == intensity) {
+                  strongest = first ? 0 : 1;
+                }
+                if (first && strongest) {
+                  return_type = RETURN_TYPE::DUAL_STRONGEST_FIRST;
+                } else if (!first && strongest) {
+                  return_type = RETURN_TYPE::DUAL_STRONGEST_LAST;
+                } else if (first && !strongest) {
+                  return_type = RETURN_TYPE::DUAL_WEAK_FIRST;
+                } else if (!first && !strongest) {
+                  return_type = RETURN_TYPE::DUAL_WEAK_LAST;
+                } else {
+                  return_type = RETURN_TYPE::INVALID;
+                }
+              }
+              break;
+            case RETURN_MODE_STRONGEST:
+              return_type = RETURN_TYPE::SINGLE_STRONGEST;
+              break;
+            case RETURN_MODE_LAST:
+              return_type = RETURN_TYPE::SINGLE_LAST;
+              break;
+            default:
+              return_type = RETURN_TYPE::INVALID;
+          }
+          data.is_valid = true;
+          data.return_type = return_type;
+          data.laser_ring = corrections.laser_ring;
+          data.azimuth_corrected = azimuth_corrected;
+          data.intensity = intensity;
+          if (is_invalid_distance) {
+            data.distance = 0;
+          } else {
+            data.distance = distance;
           }
         }
       }
@@ -775,6 +1022,593 @@ namespace velodyne_rawdata
             }
           }
         }
+      }
+    }
+  }
+
+/** @brief convert raw VLS128 packet to point cloud
+ *
+ *  @param pkt raw packet to unpack
+ *  @param data elements of point (point are appended)
+ *  @param loop_info loop counters
+ */
+  void RawData::unpack_vls128(
+    const velodyne_msgs::msg::VelodynePacket & pkt,
+    point_elements_t & data, const vls128_loop_info_t & loop_info)
+  {
+    const raw_packet_t * raw = (const raw_packet_t *) &pkt.data[0];
+    const uint8_t return_mode = pkt.data[1204];
+    const bool dual_return = (return_mode == RETURN_MODE_DUAL);
+    uint block = loop_info.block;
+    uint j = loop_info.j;
+    uint k = loop_info.k;
+    uint16_t azimuth = loop_info.azimuth;
+    float azimuth_diff = loop_info.azimuth_diff;
+    // Cache block for use.
+    const raw_block_t & current_block = raw->blocks[block];
+
+    if (block >= static_cast < uint > (BLOCKS_PER_PACKET - (4 * dual_return))) {
+      return;
+    }
+
+    uint bank_origin = 0;
+    // Used to detect which bank of 32 lasers is in this block.
+    switch (current_block.header) {
+      case VLS128_BANK_1:
+        bank_origin = 0;
+        break;
+      case VLS128_BANK_2:
+        bank_origin = 32;
+        break;
+      case VLS128_BANK_3:
+        bank_origin = 64;
+        break;
+      case VLS128_BANK_4:
+        bank_origin = 96;
+        break;
+      default:
+        // Do not flood the log with messages, only issue at most one
+        // of these warnings per minute.
+        RCLCPP_WARN_STREAM_THROTTLE(
+          node_ptr_->get_logger(), *node_ptr_->get_clock(),
+          60000 /* ms */, "skipping invalid VLS-128 packet: block " <<
+            block << " header value is " <<
+            raw->blocks[block].header);
+        return; // bad packet: skip the rest
+    }
+
+    // Condition added to avoid calculating points which are not in the interesting defined area
+    // (min_angle < area < max_angle).
+    if ((config_.min_angle < config_.max_angle && azimuth >= config_.min_angle &&
+      azimuth <= config_.max_angle) || (config_.min_angle > config_.max_angle))
+    {
+      union two_bytes current_return;
+      union two_bytes other_return;
+      // Distance extraction.
+      current_return.bytes[0] = current_block.data[k];
+      current_return.bytes[1] = current_block.data[k + 1];
+
+      if (dual_return) {
+        other_return.bytes[0] = block %
+          2 ? raw->blocks[block - 1].data[k] : raw->blocks[block + 1].data[k];
+        other_return.bytes[1] = block %
+          2 ? raw->blocks[block - 1].data[k + 1] : raw->blocks[block + 1].data[k + 1];
+      }
+      // Do not process if there is no return, or in dual return mode and the first and last echos are the same.
+      if ((current_return.bytes[0] == 0 && current_return.bytes[1] == 0) ||
+        (dual_return && block % 2 && other_return.bytes[0] == current_return.bytes[0] &&
+        other_return.bytes[1] == current_return.bytes[1]))
+      {
+        return;
+      }
+      {
+        const uint laser_number = j + bank_origin; // offset the laser in this block by which block it's in
+        const uint firing_order = laser_number / 8; // VLS-128 fires 8 lasers at a time
+
+        velodyne_pointcloud::LaserCorrection & corrections =
+          calibration_.laser_corrections[laser_number];
+
+        float distance = current_return.uint * VLP128_DISTANCE_RESOLUTION;
+        bool is_invalid_distance = false;
+        if (distance < 1e-6) {
+          is_invalid_distance = true;
+          distance = 0.3;
+        } else {
+          distance += corrections.dist_correction;
+        }
+
+        // Correct for the laser rotation as a function of timing during the firings.
+        const float azimuth_corrected_f = azimuth +
+          (azimuth_diff * vls_128_laser_azimuth_cache[firing_order]);
+        const uint16_t azimuth_corrected = ((uint16_t) round(azimuth_corrected_f)) % 36000;
+
+        // Condition added to avoid calculating points which are not in the interesting defined area
+        // (min_angle < area < max_angle).
+        if ((azimuth_corrected >= config_.min_angle &&
+          azimuth_corrected <= config_.max_angle &&
+          config_.min_angle < config_.max_angle) ||
+          (config_.min_angle > config_.max_angle &&
+          (azimuth_corrected <= config_.max_angle ||
+          azimuth_corrected >= config_.min_angle)))
+        {
+
+          // convert polar coordinates to Euclidean XYZ.
+          const float cos_vert_angle = corrections.cos_vert_correction;
+          const float sin_vert_angle = corrections.sin_vert_correction;
+          const float cos_rot_correction = corrections.cos_rot_correction;
+          const float sin_rot_correction = corrections.sin_rot_correction;
+
+          const float cos_rot_angle =
+            cos_rot_table_[azimuth_corrected] * cos_rot_correction +
+            sin_rot_table_[azimuth_corrected] * sin_rot_correction;
+          const float sin_rot_angle =
+            sin_rot_table_[azimuth_corrected] * cos_rot_correction -
+            cos_rot_table_[azimuth_corrected] * sin_rot_correction;
+
+          // Compute the distance in the xy plane (w/o accounting for rotation).
+          const float xy_distance = distance * cos_vert_angle;
+
+          // Use standard ROS coordinate system (right-hand rule).
+          data.x_coord = xy_distance * cos_rot_angle;  // velodyne y
+          data.y_coord = -(xy_distance * sin_rot_angle); // velodyne x
+          data.z_coord = distance * sin_vert_angle;    // velodyne z
+          const float intensity = current_block.data[k + 2];
+
+          data.time_stamp = block * 55.3 / 1000.0 / 1000.0 + j * 2.665 / 1000.0 /
+            1000.0 + rclcpp::Time(pkt.stamp).seconds();
+
+          // Determine return type.
+          uint8_t return_type;
+          switch (return_mode) {
+            case RETURN_MODE_DUAL:
+              if ((other_return.bytes[0] == 0 && other_return.bytes[1] == 0) ||
+                (other_return.bytes[0] == current_return.bytes[0] &&
+                other_return.bytes[1] == current_return.bytes[1]))
+              {
+                return_type = RETURN_TYPE::DUAL_ONLY;
+              } else {
+                const float other_intensity = block %
+                  2 ? raw->blocks[block - 1].data[k + 2] : raw->blocks[block + 1].data[k + 2];
+                bool first = other_return.uint < current_return.uint ? 0 : 1;
+                bool strongest = other_intensity < intensity ? 1 : 0;
+                if (other_intensity == intensity) {
+                  strongest = first ? 0 : 1;
+                }
+                if (first && strongest) {
+                  return_type = RETURN_TYPE::DUAL_STRONGEST_FIRST;
+                } else if (!first && strongest) {
+                  return_type = RETURN_TYPE::DUAL_STRONGEST_LAST;
+                } else if (first && !strongest) {
+                  return_type = RETURN_TYPE::DUAL_WEAK_FIRST;
+                } else if (!first && !strongest) {
+                  return_type = RETURN_TYPE::DUAL_WEAK_LAST;
+                } else {
+                  return_type = RETURN_TYPE::INVALID;
+                }
+              }
+              break;
+            case RETURN_MODE_STRONGEST:
+              return_type = RETURN_TYPE::SINGLE_STRONGEST;
+              break;
+            case RETURN_MODE_LAST:
+              return_type = RETURN_TYPE::SINGLE_LAST;
+              break;
+            default:
+              return_type = RETURN_TYPE::INVALID;
+          }
+          data.is_valid = true;
+          data.return_type = return_type;
+          data.laser_ring = corrections.laser_ring;
+          data.azimuth_corrected = azimuth_corrected;
+          data.intensity = intensity;
+          if (is_invalid_distance) {
+            data.distance = 0;
+          } else {
+            data.distance = distance;
+          }
+        }
+      }
+    }
+  }
+
+/** @brief convert raw packet to point cloud
+ *
+ *  @param pkt raw packet to unpack
+ *  @param data elements of point (point are appended)
+ *  @param loop_info loop counters
+ */
+  void RawData::unpack_default(
+    const velodyne_msgs::msg::VelodynePacket & pkt,
+    point_elements_t & data, const default_loop_info_t & loop_info)
+  {
+    using velodyne_pointcloud::LaserCorrection;
+    const raw_packet_t * raw = (const raw_packet_t *) &pkt.data[0];
+    int i = loop_info.i;
+    int j = loop_info.j;
+    int k = loop_info.k;
+    int bank_origin = 0;
+
+    if (raw->blocks[i].header == LOWER_BANK) {
+      // lower bank lasers are [32..63]
+      bank_origin = 32;
+    }
+
+    float x, y, z;
+    float intensity;
+    const uint8_t laser_number = j + bank_origin;
+
+    const LaserCorrection & corrections = calibration_.laser_corrections[laser_number];
+
+    /** Position Calculation */
+    const raw_block_t & block = raw->blocks[i];
+    union two_bytes tmp;
+    tmp.bytes[0] = block.data[k];
+    tmp.bytes[1] = block.data[k + 1];
+    // if (tmp.bytes[0]==0 &&tmp.bytes[1]==0 ) //no laser beam return
+    // {
+    //   continue;
+    // }
+
+    // float distance = tmp.uint * calibration_.distance_resolution_m;
+    // distance += corrections.dist_correction;
+    // if (!pointInRange(distance)) continue;
+
+    /*condition added to avoid calculating points which are not
+        in the interesting defined area (min_angle < area < max_angle)*/
+    if (
+      (block.rotation >= config_.min_angle && block.rotation <= config_.max_angle &&
+      config_.min_angle < config_.max_angle) ||
+      (config_.min_angle > config_.max_angle && (raw->blocks[i].rotation <= config_.max_angle ||
+      raw->blocks[i].rotation >= config_.min_angle)))
+    {
+      float distance = tmp.uint * calibration_.distance_resolution_m;
+
+      bool is_invalid_distance = false;
+      if (distance < 1e-6) {
+        is_invalid_distance = true;
+        distance = 0.3;
+      } else {
+        distance += corrections.dist_correction;
+      }
+
+      const float cos_vert_angle = corrections.cos_vert_correction;
+      const float sin_vert_angle = corrections.sin_vert_correction;
+      const float cos_rot_correction = corrections.cos_rot_correction;
+      const float sin_rot_correction = corrections.sin_rot_correction;
+
+      // cos(a-b) = cos(a)*cos(b) + sin(a)*sin(b)
+      // sin(a-b) = sin(a)*cos(b) - cos(a)*sin(b)
+      const float cos_rot_angle = cos_rot_table_[block.rotation] * cos_rot_correction +
+        sin_rot_table_[block.rotation] * sin_rot_correction;
+      const float sin_rot_angle = sin_rot_table_[block.rotation] * cos_rot_correction -
+        cos_rot_table_[block.rotation] * sin_rot_correction;
+
+      const float horiz_offset = corrections.horiz_offset_correction;
+      const float vert_offset = corrections.vert_offset_correction;
+
+      // Compute the distance in the xy plane (w/o accounting for rotation)
+      /**the new term of 'vert_offset * sin_vert_angle'
+         * was added to the expression due to the mathemathical
+         * model we used.
+         */
+      float xy_distance = distance * cos_vert_angle - vert_offset * sin_vert_angle;
+
+      // Calculate temporal X, use absolute value.
+      float xx = xy_distance * sin_rot_angle - horiz_offset * cos_rot_angle;
+      // Calculate temporal Y, use absolute value
+      float yy = xy_distance * cos_rot_angle + horiz_offset * sin_rot_angle;
+      if (xx < 0) {xx = -xx;}
+      if (yy < 0) {yy = -yy;}
+
+      // Get 2points calibration values,Linear interpolation to get distance
+      // correction for X and Y, that means distance correction use
+      // different value at different distance
+      float distance_corr_x = 0;
+      float distance_corr_y = 0;
+      if (corrections.two_pt_correction_available) {
+        distance_corr_x = (corrections.dist_correction - corrections.dist_correction_x) *
+          (xx - 2.4) / (25.04 - 2.4) +
+          corrections.dist_correction_x;
+        distance_corr_x -= corrections.dist_correction;
+        distance_corr_y = (corrections.dist_correction - corrections.dist_correction_y) *
+          (yy - 1.93) / (25.04 - 1.93) +
+          corrections.dist_correction_y;
+        distance_corr_y -= corrections.dist_correction;
+      }
+
+      const float distance_x = distance + distance_corr_x;
+      /**the new term of 'vert_offset * sin_vert_angle'
+         * was added to the expression due to the mathemathical
+         * model we used.
+         */
+      xy_distance = distance_x * cos_vert_angle - vert_offset * sin_vert_angle;
+      ///the expression wiht '-' is proved to be better than the one with '+'
+      x = xy_distance * sin_rot_angle - horiz_offset * cos_rot_angle;
+
+      const float distance_y = distance + distance_corr_y;
+      xy_distance = distance_y * cos_vert_angle - vert_offset * sin_vert_angle;
+      /**the new term of 'vert_offset * sin_vert_angle'
+         * was added to the expression due to the mathemathical
+         * model we used.
+         */
+      y = xy_distance * cos_rot_angle + horiz_offset * sin_rot_angle;
+
+      // Using distance_y is not symmetric, but the velodyne manual
+      // does this.
+      /**the new term of 'vert_offset * cos_vert_angle'
+         * was added to the expression due to the mathemathical
+         * model we used.
+         */
+      z = distance_y * sin_vert_angle + vert_offset * cos_vert_angle;
+
+      /** Use standard ROS coordinate system (right-hand rule) */
+      data.x_coord = y;
+      data.y_coord = -x;
+      data.z_coord = z;
+
+      /** Intensity Calculation */
+      const float min_intensity = corrections.min_intensity;
+      const float max_intensity = corrections.max_intensity;
+
+      intensity = raw->blocks[i].data[k + 2];
+
+      const float focal_offset =
+        256 * (1 - corrections.focal_distance / 13100) *
+        (1 - corrections.focal_distance / 13100);
+      const float focal_slope = corrections.focal_slope;
+      intensity += focal_slope *
+        (std::abs(focal_offset - 256 * SQR(1 - static_cast < float > (tmp.uint) / 65535)));
+      intensity = (intensity < min_intensity) ? min_intensity : intensity;
+      intensity = (intensity > max_intensity) ? max_intensity : intensity;
+
+      data.time_stamp =
+        i * 55.296 / 1000.0 / 1000.0 + j * 2.304 / 1000.0 / 1000.0 +
+        rclcpp::Time(pkt.stamp).seconds();
+      // Temporary to stop compile error - fix to give VLP32 support
+      uint8_t return_mode = pkt.data[1204];
+      uint8_t return_type;
+      switch (return_mode) {
+        case RETURN_MODE_DUAL:
+          return_type = RETURN_TYPE::INVALID;
+          break;
+        case RETURN_MODE_STRONGEST:
+          return_type = RETURN_TYPE::SINGLE_STRONGEST;
+          break;
+        case RETURN_MODE_LAST:
+          return_type = RETURN_TYPE::SINGLE_LAST;
+          break;
+        default:
+          return_type = RETURN_TYPE::INVALID;
+      }
+      data.is_valid = true;
+      data.return_type = return_type;
+      data.laser_ring = corrections.laser_ring;
+      data.azimuth_corrected = raw->blocks[i].rotation;
+      data.intensity = intensity;
+      if (is_invalid_distance) {
+        data.distance = 0;
+      } else {
+        data.distance = distance;
+      }
+    }
+  }
+
+/** @brief calculate azimuth from raw packet
+ *
+ *  @param packet raw packet to calculate azimuth parameters
+ *  @param azimuth_info struct to be set azimuth parameters
+ */
+  void RawData::calc_azimuth(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    azimuth_info_t & azimuth_info)
+  {
+    if (calibration_.num_lasers == 16) {
+      calc_azimuth_vlp16(packet, azimuth_info);
+    } else if (calibration_.num_lasers == 128) {
+      calc_azimuth_vls128(packet, azimuth_info);
+    }
+  }
+
+/** @brief calculate azimuth from raw VLP16 packet
+ *
+ *  @param packet raw packet to calculate azimuth parameters
+ *  @param azimuth_info struct to be set azimuth parameters
+ */
+  void RawData::calc_azimuth_vlp16(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    azimuth_info_t & azimuth_info)
+  {
+    const raw_packet_t * raw = (const raw_packet_t *) &packet.data[0];
+    float last_azimuth_diff = 0;
+    uint16_t azimuth_next;
+    const uint8_t return_mode = packet.data[1204];
+    const bool dual_return = (return_mode == RETURN_MODE_DUAL);
+
+    for (uint block = 0; block < BLOCKS_PER_PACKET; block++) {
+      // Cache block for use.
+      const raw_block_t & current_block = raw->blocks[block];
+
+      // Calculate difference between current and next block's azimuth angle.
+      if (block == 0) {
+        azimuth_info.azimuths[block] = current_block.rotation;
+      } else {
+        azimuth_info.azimuths[block] = azimuth_next;
+      }
+      if (block < static_cast < uint > (BLOCKS_PER_PACKET - (1 + dual_return))) {
+        // Get the next block rotation to calculate how far we rotate between blocks.
+        azimuth_next = raw->blocks[block + (1 + dual_return)].rotation;
+
+        // Finds the difference between two sucessive blocks.
+        azimuth_info.azimuth_diffs[block] =
+          static_cast < float > ((36000 + azimuth_next - azimuth_info.azimuths[block]) % 36000);
+
+        // This is used when the last block is next to predict rotation amount
+        last_azimuth_diff = azimuth_info.azimuth_diffs[block];
+      } else {
+        // This makes the assumption the difference between the last block and the next packet is the
+        // same as the last to the second to last.
+        // Assumes RPM doesn't change much between blocks.
+        azimuth_info.azimuth_diffs[block] = (block == static_cast < uint > (
+            BLOCKS_PER_PACKET - dual_return - 1) ? 0 : last_azimuth_diff);
+      }
+    }
+  }
+
+/** @brief calculate azimuth from raw VLS128 packet
+ *
+ *  @param packet raw packet to calculate azimuth parameters
+ *  @param azimuth_info struct to be set azimuth parameters
+ */
+  void RawData::calc_azimuth_vls128(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    azimuth_info_t & azimuth_info)
+  {
+    const raw_packet_t * raw = (const raw_packet_t *) &packet.data[0];
+    float last_azimuth_diff = 0;
+    uint16_t azimuth_next;
+    const uint8_t return_mode = packet.data[1204];
+    const bool dual_return = (return_mode == RETURN_MODE_DUAL);
+
+    for (uint block = 0; block < static_cast < uint > (BLOCKS_PER_PACKET - (4 * dual_return));
+      block++)
+    {
+      // Cache block for use.
+      const raw_block_t & current_block = raw->blocks[block];
+
+      // Calculate difference between current and next block's azimuth angle.
+      if (block == 0) {
+        azimuth_info.azimuths[block] = current_block.rotation;
+      } else {
+        azimuth_info.azimuths[block] = azimuth_next;
+      }
+      if (block < static_cast < uint > (BLOCKS_PER_PACKET - (1 + dual_return))) {
+        // Get the next block rotation to calculate how far we rotate between blocks
+        azimuth_next = raw->blocks[block + (1 + dual_return)].rotation;
+
+        // Finds the difference between two sucessive blocks
+        azimuth_info.azimuth_diffs[block] =
+          static_cast < float > ((36000 + azimuth_next - azimuth_info.azimuths[block]) % 36000);
+
+        // This is used when the last block is next to predict rotation amount
+        last_azimuth_diff = azimuth_info.azimuth_diffs[block];
+      } else {
+        // This makes the assumption the difference between the last block and the next packet is the
+        // same as the last to the second to last.
+        // Assumes RPM doesn't change much between blocks.
+        azimuth_info.azimuth_diffs[block] = (block == static_cast < uint > (BLOCKS_PER_PACKET - (4 * dual_return) - 1)) ?
+          0 : last_azimuth_diff;
+      }
+    }
+  }
+
+/** @brief check block headers of raw packet
+ *
+ *  @param packet raw packet to calculate azimuth parameters
+ *  @param it_pkt iterator of packet type
+ */
+  void RawData::check_header(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    std::vector<PACKET_TYPE>::iterator it_pkt)
+  {
+    /** special parsing for the VLP16 **/
+    if (calibration_.num_lasers == 16) {
+      check_header_vlp16(packet, it_pkt);
+      return;
+    }
+
+    const raw_packet_t * raw = (const raw_packet_t *)&packet.data[0];
+    auto it_blk = it_pkt;
+
+    for (int i = 0; i < BLOCKS_PER_PACKET; i++, it_blk += SCANS_PER_BLOCK) {
+      // upper bank lasers are numbered [0..31]
+      // NOTE: this is a change from the old velodyne_common implementation
+
+      if (raw->blocks[i].header == LOWER_BANK) {
+        // lower bank lasers are [32..63]
+      }
+      /** special parsing for the VLS128 **/
+      else if (calibration_.num_lasers == 128) {
+        check_header_vls128(packet, it_pkt);
+        return;
+      }
+
+      // default packet type
+      std::fill(
+        it_blk, it_blk + SCANS_PER_BLOCK,
+        PACKET_TYPE::TYPE_DEFAULT);
+    }
+  }
+
+/** @brief check block headers of raw packet
+ *
+ *  @param packet raw packet to calculate azimuth parameters
+ *  @param it_pkt iterator of packet type
+ */
+  void RawData::check_header_vlp16(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    std::vector<PACKET_TYPE>::iterator it_pkt)
+  {
+    const raw_packet_t * raw = (const raw_packet_t *) &packet.data[0];
+    auto it_blk = it_pkt;
+
+    for (uint block = 0; block < BLOCKS_PER_PACKET; block++, it_blk += SCANS_PER_BLOCK) {
+      if (UPPER_BANK != raw->blocks[block].header) {
+        // Do not flood the log with messages, only issue at most one
+        // of these warnings per minute.
+        RCLCPP_WARN_STREAM_THROTTLE(
+          node_ptr_->get_logger(), *node_ptr_->get_clock(),
+          60000 /* ms */, "skipping invalid VLS-128 packet: block " <<
+            block << " header value is " <<
+            raw->blocks[block].header);
+        return; // bad packet: skip the rest
+      }
+      // vlp16 packet type
+      std::fill(
+        it_blk, it_blk + SCANS_PER_BLOCK,
+        PACKET_TYPE::TYPE_VLP16);
+    }
+  }
+
+/** @brief check block headers of raw packet
+ *
+ *  @param packet raw packet to calculate azimuth parameters
+ *  @param it_pkt iterator of packet type
+ */
+  void RawData::check_header_vls128(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    std::vector<PACKET_TYPE>::iterator it_pkt)
+  {
+    const raw_packet_t * raw = (const raw_packet_t *) &packet.data[0];
+    const uint8_t return_mode = packet.data[1204];
+    const bool dual_return = (return_mode == RETURN_MODE_DUAL);
+    auto it_blk = it_pkt;
+
+    for (uint block = 0; block < static_cast < uint > (BLOCKS_PER_PACKET - (4 * dual_return));
+      block++, it_blk += SCANS_PER_BLOCK)
+    {
+      // Cache block for use.
+      const raw_block_t & current_block = raw->blocks[block];
+
+      // Used to detect which bank of 32 lasers is in this block.
+      switch (current_block.header) {
+        case VLS128_BANK_1:
+        case VLS128_BANK_2:
+        case VLS128_BANK_3:
+        case VLS128_BANK_4:
+          // vls128 packet type
+          std::fill(
+            it_blk, it_blk + SCANS_PER_BLOCK,
+            PACKET_TYPE::TYPE_VLS128);
+          break;
+        default:
+          // Do not flood the log with messages, only issue at most one
+          // of these warnings per minute.
+          RCLCPP_WARN_STREAM_THROTTLE(
+            node_ptr_->get_logger(), *node_ptr_->get_clock(),
+            60000 /* ms */, "skipping invalid VLS-128 packet: block " <<
+              block << " header value is " <<
+              raw->blocks[block].header);
+          return; // bad packet: skip the rest
       }
     }
   }

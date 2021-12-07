@@ -147,6 +147,118 @@ typedef struct raw_packet
   uint8_t status[PACKET_STATUS_SIZE];
 } raw_packet_t;
 
+typedef struct point_elements
+{
+  bool is_valid;              // whether this point is to be added or not
+  float x_coord;              // x coordinate
+  float y_coord;              // y coordinate
+  float z_coord;              // z coordinate
+  uint8_t return_type;        // return type
+  int laser_ring;             // ring
+  uint16_t azimuth_corrected; // azimuth
+  float distance;             // distance
+  float intensity;            // intensity
+  double time_stamp;          // time stamp
+
+  point_elements(){
+    is_valid = false;
+  }
+} point_elements_t;
+
+typedef float AzimuthDiffPerPacket[BLOCKS_PER_PACKET];
+typedef uint16_t AzimuthPerPacket[BLOCKS_PER_PACKET];
+
+/** azimuth parameters */
+typedef struct
+{
+  AzimuthDiffPerPacket azimuth_diffs;  // azimuth_diff array of packet
+  AzimuthPerPacket azimuths;           // azimuth array of packet
+} azimuth_info_t;
+
+/** packet type */
+enum PACKET_TYPE
+{
+  TYPE_INVALID = 0,
+  TYPE_DEFAULT = 1,
+  TYPE_VLP16 = 2,
+  TYPE_VLS128 = 3
+};
+
+/** OpenMP loop counters */
+typedef struct vlp16_loop_info
+{
+  size_t packet_id;
+  uint block;
+  int firing;
+  int dsr;
+  int k;
+  float azimuth_diff;
+  uint16_t azimuth;
+
+  vlp16_loop_info(size_t loop_id, const std::vector<azimuth_info_t> & azimuth_info)
+  {
+    packet_id = loop_id / SCANS_PER_PACKET;
+    size_t remain = loop_id % SCANS_PER_PACKET;
+    block = remain / SCANS_PER_BLOCK;
+    remain = remain % SCANS_PER_BLOCK;
+    firing = remain / VLP16_SCANS_PER_FIRING;
+    dsr = remain % VLP16_SCANS_PER_FIRING;
+    k = (firing * VLP16_SCANS_PER_FIRING + dsr) * RAW_SCAN_SIZE;
+    try {
+      azimuth = azimuth_info.at(packet_id).azimuths[block];
+      azimuth_diff = azimuth_info.at(packet_id).azimuth_diffs[block];
+    }
+    catch (std::out_of_range& ex) {
+      std::cerr << "vlp16_loop_info : out of range error" << std::endl;
+    }
+  }
+} vlp16_loop_info_t;
+
+typedef struct vls128_loop_info
+{
+  size_t packet_id;
+  uint block;
+  uint j;
+  uint k;
+  float azimuth_diff;
+  uint16_t azimuth;
+
+  vls128_loop_info(size_t loop_id, const std::vector<azimuth_info_t> & azimuth_info)
+  {
+    packet_id = loop_id / SCANS_PER_PACKET;
+    size_t remain = loop_id % SCANS_PER_PACKET;
+    block = remain / SCANS_PER_BLOCK;
+    j = remain % SCANS_PER_BLOCK;
+    k = j * RAW_SCAN_SIZE;
+    try {
+      azimuth = azimuth_info.at(packet_id).azimuths[block];
+      azimuth_diff = azimuth_info.at(packet_id).azimuth_diffs[block];
+    }
+    catch (std::out_of_range& ex) {
+      std::cerr << "vls128_loop_info : out of range error" << std::endl;
+    }
+  }
+} vls128_loop_info_t;
+
+typedef struct default_loop_info
+{
+  size_t packet_id;
+  int i;
+  int j;
+  int k;
+  float azimuth_diff;
+  uint16_t azimuth;
+
+  default_loop_info(size_t loop_id)
+  {
+    packet_id = loop_id / SCANS_PER_PACKET;
+    size_t remain = loop_id % SCANS_PER_PACKET;
+    i = remain / SCANS_PER_BLOCK;
+    j = remain % SCANS_PER_BLOCK;
+    k = j * RAW_SCAN_SIZE;
+  }
+} default_loop_info_t;
+
 /** \brief Velodyne echo types */
 enum RETURN_TYPE
 {
@@ -194,6 +306,8 @@ public:
 
   void unpack(const velodyne_msgs::msg::VelodynePacket & pkt, DataContainerBase & data);
 
+  void unpack_all(const std::vector<velodyne_msgs::msg::VelodynePacket> & packets, DataContainerBase & data);
+
   void setParameters(double min_range, double max_range, double view_direction, double view_width);
 
   int scansPerPacket() const;
@@ -229,11 +343,61 @@ private:
   // Caches the azimuth percent offset for the VLS-128 laser firings
   float vls_128_laser_azimuth_cache[16];
 
+  /** calculate azimuth and decide packet type to be unpacked */
+  bool preprocess_unpack(
+    const std::vector<velodyne_msgs::msg::VelodynePacket> & packets,
+    std::vector<PACKET_TYPE> & packet_types, std::vector<azimuth_info_t> & azimuth_info);
+
   /** add private function to handle the VLP16 **/
   void unpack_vlp16(const velodyne_msgs::msg::VelodynePacket & pkt, DataContainerBase & data);
 
+  /** add private function to handle the VLP16 **/
+  void unpack_vlp16(
+    const velodyne_msgs::msg::VelodynePacket & pkt,
+    point_elements_t & data, const vlp16_loop_info_t & loop_info);
+
   /** add private function to handle the VLS128 **/
   void unpack_vls128(const velodyne_msgs::msg::VelodynePacket &pkt, DataContainerBase &data);
+
+  /** add private function to handle the VLS128 **/
+  void unpack_vls128(
+    const velodyne_msgs::msg::VelodynePacket &pkt,
+    point_elements_t & data, const vls128_loop_info_t & loop_info);
+
+  /** add private function to handle defaults **/
+  void unpack_default(
+    const velodyne_msgs::msg::VelodynePacket &pkt,
+    point_elements_t & data, const default_loop_info_t & loop_info);
+
+  /** calculate azimuth from raw packet */
+  void calc_azimuth(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    azimuth_info_t & azimuth_info);
+
+  /** calculate azimuth from raw VLP16 packet */
+  void calc_azimuth_vlp16(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    azimuth_info_t & azimuth_info);
+
+  /** calculate azimuth from raw VLS128 packet */
+  void calc_azimuth_vls128(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    azimuth_info_t & azimuth_info);
+
+  /** check block headers */
+  void check_header(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    std::vector<PACKET_TYPE>::iterator it_pkt);
+
+  /** check block headers */
+  void check_header_vlp16(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    std::vector<PACKET_TYPE>::iterator it_pkt);
+
+  /** check block headers */
+  void check_header_vls128(
+    const velodyne_msgs::msg::VelodynePacket & packet,
+    std::vector<PACKET_TYPE>::iterator it_pkt);
 
   /** in-line test whether a point is in range */
   bool pointInRange(float range)
