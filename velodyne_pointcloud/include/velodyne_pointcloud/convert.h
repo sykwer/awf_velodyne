@@ -37,10 +37,6 @@
 
 namespace velodyne_pointcloud
 {
-
-static const std::string test_vector_input_file = "convert_test_input.yaml";
-static const std::string test_vector_output_file = "convert_test_output.yaml";
-
 class Convert : public rclcpp::Node
 {
 public:
@@ -56,8 +52,12 @@ private:
   bool getTransform(
     const std::string & target_frame, const std::string & source_frame,
     tf2::Transform * tf2_transform_ptr);
-  void writeInPackets(int frame_id, const velodyne_msgs::msg::VelodyneScan::SharedPtr scan);
-  void writeOutPointClouds(int frame_id, const velodyne_pointcloud::PointcloudXYZIRADT & cloud);
+  void writeInPackets(
+      const std::string & filename,
+      const std::vector<velodyne_msgs::msg::VelodyneScan::SharedPtr> & scans);
+  void writeOutPointClouds(
+    const std::string & filename,
+    const std::vector<velodyne_pointcloud::PointcloudXYZIRADT> & clouds);
 
   rclcpp::Subscription<velodyne_msgs::msg::VelodyneScan>::SharedPtr velodyne_scan_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr velodyne_points_pub_;
@@ -94,7 +94,14 @@ private:
   Config config_;
 
   bool save_test_vector_;
-  int convert_frame_id_;
+  uint32_t test_vector_sampling_start_;
+  uint32_t test_vector_sampling_rate_;
+  uint32_t test_vector_sampling_end_;
+  uint32_t frame_id_;
+  std::string test_vector_input_file_;
+  std::string test_vector_output_file_;
+  std::vector<velodyne_msgs::msg::VelodyneScan::SharedPtr> test_vector_inputs_;
+  std::vector<velodyne_pointcloud::PointcloudXYZIRADT> test_vector_outputs_;
 };
 
 }  // namespace velodyne_pointcloud

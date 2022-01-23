@@ -19,6 +19,7 @@
 #include <velodyne_pointcloud/pointcloudXYZIRADT.h>
 
 #include <yaml-cpp/yaml.h>
+#include <regex>
 
 #include <velodyne_pointcloud/func.h>
 
@@ -61,12 +62,26 @@ Convert::Convert(const rclcpp::NodeOptions & options)
   // get path to angles.config file for this device
   std::string calibration_file = this->declare_parameter("calibration", "");
 
-  save_test_vector_ = this->declare_parameter("save_test_vector", false);
-  convert_frame_id_ = 0;
-  // make empty files
+  save_test_vector_ = static_cast<bool>(this->declare_parameter("save_test_vector", false));
+  declare_parameter("test_vector_sampling_start", 0);
+  declare_parameter("test_vector_sampling_rate", 0);
+  declare_parameter("test_vector_sampling_end", 0);
+  test_vector_sampling_start_ = get_parameter("test_vector_sampling_start").as_int();
+  test_vector_sampling_rate_ = get_parameter("test_vector_sampling_rate").as_int();
+  test_vector_sampling_end_ = get_parameter("test_vector_sampling_end").as_int();
+  frame_id_ = 0;
   if (save_test_vector_) {
-    (void)std::ofstream(test_vector_input_file);
-    (void)std::ofstream(test_vector_output_file);
+    // make prefix of test vector file name
+    // (e.g. /sensing/lidar/left/crop_box_filter_self -> sensing_lidar_left_crop_box_filter_self)
+    std::string prefix =
+      std::regex_replace(std::string(get_namespace()), std::regex("/"), "_").erase(0, 1) +
+      "_" +
+      std::string(get_name());
+    test_vector_input_file_ = prefix + "_input_vector.yaml";
+    test_vector_output_file_ = prefix + "_output_vector.yaml";
+    // make empty files
+    (void)std::ofstream(test_vector_input_file_);
+    (void)std::ofstream(test_vector_output_file_);
   }
 
   rcl_interfaces::msg::ParameterDescriptor min_range_desc;
@@ -227,15 +242,33 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
     _overflow_buffer.pc->width = 0;
     _overflow_buffer.pc->height = 1;
 
+    velodyne_pointcloud::PointcloudXYZIRADT scan_points_xyziradt_no_overflow;
+
     for (size_t i = 0; i < scanMsg->packets.size(); ++i) {
-      data_->unpack(scanMsg->packets[i], scan_points_xyziradt);
+      data_->unpack(scanMsg->packets[i], scan_points_xyziradt_no_overflow);
     }
 
     // Write input and output to yaml files
     if (save_test_vector_) {
-      writeInPackets(convert_frame_id_, scanMsg);
-      writeOutPointClouds(convert_frame_id_, scan_points_xyziradt);
-      convert_frame_id_++;
+      int frame_id = frame_id_ - test_vector_sampling_start_;
+      if (frame_id >= 0 &&
+          frame_id % test_vector_sampling_rate_ == test_vector_sampling_rate_ - 1) {
+        RCLCPP_INFO(this->get_logger(), "sampling test vector data");
+        test_vector_inputs_.push_back(scanMsg);
+        test_vector_outputs_.push_back(scan_points_xyziradt_no_overflow);
+      }
+      if (frame_id_ == test_vector_sampling_end_) {
+        RCLCPP_INFO(this->get_logger(), "start writing test vector");
+        writeInPackets(test_vector_input_file_, test_vector_inputs_);
+        writeOutPointClouds(test_vector_output_file_, test_vector_outputs_);
+        RCLCPP_INFO(this->get_logger(), "complete writing test vector");
+      }
+      frame_id_++;
+    }
+
+    // Add unpacked pointclouds
+    for (size_t i = 0; i < scan_points_xyziradt_no_overflow.pc->points.size(); ++i) {
+      scan_points_xyziradt.pc->points.push_back(scan_points_xyziradt_no_overflow.pc->points[i]);
     }
 
     // Remove overflow points and add to overflow buffer for next scan
@@ -401,50 +434,59 @@ visualization_msgs::msg::MarkerArray Convert::createVelodyneModelMakerMsg(
 
 /** @brief Write input packets data to yaml file. */
 void Convert::writeInPackets(
-  int frame_id, const velodyne_msgs::msg::VelodyneScan::SharedPtr scan)
+  const std::string & filename,
+  const std::vector<velodyne_msgs::msg::VelodyneScan::SharedPtr> & scans)
 {
   YAML::Emitter emitter;
-  emitter << YAML::BeginSeq;
-  emitter << YAML::BeginMap;
-  emitter << YAML::Key << "frame_id" << YAML::Value << frame_id;
-  emitter << YAML::Key << "packets" << YAML::Value;
-  emitter << YAML::BeginSeq;
-  for (size_t i = 0; i < scan->packets.size(); i++) {
+  uint32_t frame_id = 0;
+  for (auto scan = scans.begin(), end = scans.end(); scan != end; scan++, frame_id++) {
+    emitter << YAML::BeginSeq;
     emitter << YAML::BeginMap;
-    emitter << YAML::Key << "packet_id" << YAML::Value << i;
-    std::vector<unsigned> data_vector(std::begin(scan->packets[i].data), std::end(scan->packets[i].data));
-    emitter << YAML::Key << "data" << YAML::Value << YAML::Flow << data_vector;
+    emitter << YAML::Key << "frame_id" << YAML::Value << frame_id;
+    emitter << YAML::Key << "packets" << YAML::Value;
+    emitter << YAML::BeginSeq;
+    for (size_t i = 0; i < (*scan)->packets.size(); i++) {
+      emitter << YAML::BeginMap;
+      emitter << YAML::Key << "packet_id" << YAML::Value << i;
+      std::vector<unsigned> data_vector(
+        std::begin((*scan)->packets[i].data), std::end((*scan)->packets[i].data));
+      emitter << YAML::Key << "data" << YAML::Value << YAML::Flow << data_vector;
+      emitter << YAML::EndMap;
+    }
+    emitter << YAML::EndSeq;
     emitter << YAML::EndMap;
+    emitter << YAML::EndSeq;
   }
-  emitter << YAML::EndSeq;
-  emitter << YAML::EndMap;
-  emitter << YAML::EndSeq;
-  std::ofstream input_file(test_vector_input_file, std::ios::app);
+  std::ofstream input_file(filename, std::ios::app);
   input_file << emitter.c_str() << std::endl;
   input_file.close();
 }
 
 /** @brief Write output pointclouds data to yaml file. */
 void Convert::writeOutPointClouds(
-  int frame_id, const velodyne_pointcloud::PointcloudXYZIRADT & cloud)
+  const std::string & filename,
+  const std::vector<velodyne_pointcloud::PointcloudXYZIRADT> & clouds)
 {
   YAML::Emitter emitter;
-  emitter << YAML::BeginSeq;
-  emitter << YAML::BeginMap;
-  emitter << YAML::Key << "frame_id" << YAML::Value << frame_id;
-  emitter << YAML::Key << "clouds" << YAML::Value;
-  emitter << YAML::BeginSeq;
-  for (auto it = cloud.pc->begin(), e = cloud.pc->end(); it != e; ++it) {
-    emitter << YAML::Flow;
+  uint32_t frame_id = 0;
+  for (auto cloud = clouds.begin(), end = clouds.end(); cloud != end; cloud++, frame_id++) {
     emitter << YAML::BeginSeq;
-    emitter << it->x << it->y << it->z << it->intensity << it->return_type
-      << it->ring << it->azimuth << it->distance << it->time_stamp;
+    emitter << YAML::BeginMap;
+    emitter << YAML::Key << "frame_id" << YAML::Value << frame_id;
+    emitter << YAML::Key << "clouds" << YAML::Value;
+    emitter << YAML::BeginSeq;
+    for (auto it = cloud->pc->begin(), e = cloud->pc->end(); it != e; ++it) {
+      emitter << YAML::Flow;
+      emitter << YAML::BeginSeq;
+      emitter << it->x << it->y << it->z << it->intensity << unsigned(it->return_type)
+        << it->ring << it->azimuth << it->distance << it->time_stamp;
+      emitter << YAML::EndSeq;
+    }
+    emitter << YAML::EndSeq;
+    emitter << YAML::EndMap;
     emitter << YAML::EndSeq;
   }
-  emitter << YAML::EndSeq;
-  emitter << YAML::EndMap;
-  emitter << YAML::EndSeq;
-  std::ofstream output_file(test_vector_output_file, std::ios::app);
+  std::ofstream output_file(filename, std::ios::app);
   output_file << emitter.c_str() << std::endl;
   output_file.close();
 }
