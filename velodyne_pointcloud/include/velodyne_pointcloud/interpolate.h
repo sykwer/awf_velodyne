@@ -59,9 +59,11 @@ private:
   std::string base_link_frame_;
 
   /** \brief Write input pointcloud data to yaml file */
-  void writePointCloud(
+  void writePointCloudAndTwist(
     const std::string & filename,
-    const std::vector<pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr> & clouds);
+    const std::vector<pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr> & clouds,
+    const std::vector<std::deque<geometry_msgs::msg::TwistStamped>> & twists,
+    bool write_twist);
 
   bool save_test_vector_;
   uint32_t test_vector_sampling_start_;
@@ -72,6 +74,7 @@ private:
   std::string test_vector_output_file_;
   std::vector<pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr> test_vector_inputs_;
   std::vector<pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr> test_vector_outputs_;
+  std::vector<std::deque<geometry_msgs::msg::TwistStamped>> test_twist_inputs_;
 
 };
 

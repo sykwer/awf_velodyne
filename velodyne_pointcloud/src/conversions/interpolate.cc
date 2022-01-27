@@ -103,11 +103,12 @@ void Interpolate::processPoints(
       RCLCPP_INFO(this->get_logger(), "sampling test vector data");
       test_vector_inputs_.push_back(points_xyziradt);
       test_vector_outputs_.push_back(interpolate_points_xyziradt);
+      test_twist_inputs_.push_back(twist_queue_);
     }
     if (frame_id_ == test_vector_sampling_end_) {
       RCLCPP_INFO(this->get_logger(), "start writing test vector");
-      writePointCloud(test_vector_input_file_, test_vector_inputs_);
-      writePointCloud(test_vector_output_file_, test_vector_outputs_);
+      writePointCloudAndTwist(test_vector_input_file_, test_vector_inputs_, test_twist_inputs_, true);
+      writePointCloudAndTwist(test_vector_output_file_, test_vector_outputs_, test_twist_inputs_, false);
       RCLCPP_INFO(this->get_logger(), "complete writing test vector");
     }
     frame_id_++;
@@ -151,13 +152,16 @@ bool Interpolate::getTransform(
   return true;
 }
 
-/** @brief Write in/out pointclouds data to yaml file. */
-void Interpolate::writePointCloud(
+/** @brief Write in/out pointclouds and twist data to yaml file. */
+void Interpolate::writePointCloudAndTwist(
   const std::string & filename,
-  const std::vector<pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr> & clouds)
+  const std::vector<pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr> & clouds,
+  const std::vector<std::deque<geometry_msgs::msg::TwistStamped>> & twists,
+  bool write_twist)
 {
   YAML::Emitter emitter;
   uint32_t frame_id = 0;
+  auto twist = twists.begin();
   for (auto cloud = clouds.begin(), end = clouds.end(); cloud != end; cloud++, frame_id++) {
     emitter << YAML::BeginSeq;
     emitter << YAML::BeginMap;
@@ -169,8 +173,8 @@ void Interpolate::writePointCloud(
     for (auto it = (*cloud)->points.begin(), e = (*cloud)->points.end(); it != e; it++) {
       emitter << YAML::Flow;
       emitter << YAML::BeginSeq;
-      emitter << it->x << it->y << it->z << it->intensity << it->return_type
-        << it->ring << it->azimuth << it->distance << it->time_stamp;
+      emitter << it->x << it->y << it->z << it->intensity << unsigned(it->return_type)
+        << it->ring << it->azimuth << it->distance << (uint64_t)(it->time_stamp * 1000000000);
       emitter << YAML::EndSeq;
     }
     emitter << YAML::EndSeq;
@@ -178,6 +182,21 @@ void Interpolate::writePointCloud(
     emitter << YAML::Key << "height" << YAML::Value << (*cloud)->height;
     emitter << YAML::Key << "is_dense" << YAML::Value << (*cloud)->is_dense;
     emitter << YAML::EndMap;
+    if (write_twist && twist != twists.end()) {
+      emitter << YAML::Key << "twist" << YAML::Value;
+      emitter << YAML::BeginSeq;
+      for (auto it = twist->begin(), end = twist->end(); it != end; it++) {
+        emitter << YAML::BeginMap;
+        emitter << YAML::Key << "stamp" << YAML::Value << ((uint64_t)(rclcpp::Time(it->header.stamp, RCL_SYSTEM_TIME).seconds() * 1000000000));
+        emitter << YAML::Key << "linear" << YAML::Value;
+        emitter << YAML::Flow << YAML::BeginSeq << it->twist.linear.x << it->twist.linear.y << it->twist.linear.z << YAML::EndSeq;
+        emitter << YAML::Key << "angular" << YAML::Value;
+        emitter << YAML::Flow << YAML::BeginSeq << it->twist.angular.x << it->twist.angular.y << it->twist.angular.z << YAML::EndSeq;
+        emitter << YAML::EndMap;
+      }
+      emitter << YAML::EndSeq;
+      twist++;
+    }
     emitter << YAML::EndMap;
     emitter << YAML::EndSeq;
   }
