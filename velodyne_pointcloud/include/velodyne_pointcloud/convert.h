@@ -58,6 +58,9 @@ private:
   void writeOutPointClouds(
     const std::string & filename,
     const std::vector<velodyne_pointcloud::PointcloudXYZIRADT> & clouds);
+  void writeOutPointClouds(
+    const std::string & filename,
+    const std::vector<pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr> & clouds);
 
   rclcpp::Subscription<velodyne_msgs::msg::VelodyneScan>::SharedPtr velodyne_scan_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr velodyne_points_pub_;
@@ -100,8 +103,10 @@ private:
   uint32_t frame_id_;
   std::string test_vector_input_file_;
   std::string test_vector_output_file_;
+  std::string test_vector_extracted_output_file_;
   std::vector<velodyne_msgs::msg::VelodyneScan::SharedPtr> test_vector_inputs_;
   std::vector<velodyne_pointcloud::PointcloudXYZIRADT> test_vector_outputs_;
+  std::vector<pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr> test_vector_extracted_outputs_;
 };
 
 }  // namespace velodyne_pointcloud

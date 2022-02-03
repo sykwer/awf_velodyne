@@ -79,9 +79,11 @@ Convert::Convert(const rclcpp::NodeOptions & options)
       std::string(get_name());
     test_vector_input_file_ = prefix + "_input_vector.yaml";
     test_vector_output_file_ = prefix + "_output_vector.yaml";
+    test_vector_extracted_output_file_ = prefix + "_extracted_output_vector.yaml";
     // make empty files
     (void)std::ofstream(test_vector_input_file_);
     (void)std::ofstream(test_vector_output_file_);
+    (void)std::ofstream(test_vector_extracted_output_file_);
   }
 
   rcl_interfaces::msg::ParameterDescriptor min_range_desc;
@@ -226,6 +228,7 @@ rcl_interfaces::msg::SetParametersResult Convert::paramCallback(const std::vecto
 void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scanMsg)
 {
   velodyne_pointcloud::PointcloudXYZIRADT scan_points_xyziradt;
+  velodyne_pointcloud::PointcloudXYZIRADT scan_points_xyziradt_no_overflow;
   if (
     velodyne_points_pub_->get_subscription_count() > 0 ||
     velodyne_points_ex_pub_->get_subscription_count() > 0 ||
@@ -242,28 +245,8 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
     _overflow_buffer.pc->width = 0;
     _overflow_buffer.pc->height = 1;
 
-    velodyne_pointcloud::PointcloudXYZIRADT scan_points_xyziradt_no_overflow;
-
     for (size_t i = 0; i < scanMsg->packets.size(); ++i) {
       data_->unpack(scanMsg->packets[i], scan_points_xyziradt_no_overflow);
-    }
-
-    // Write input and output to yaml files
-    if (save_test_vector_) {
-      int frame_id = frame_id_ - test_vector_sampling_start_;
-      if (frame_id >= 0 &&
-          frame_id % test_vector_sampling_rate_ == test_vector_sampling_rate_ - 1) {
-        RCLCPP_INFO(this->get_logger(), "sampling test vector data");
-        test_vector_inputs_.push_back(scanMsg);
-        test_vector_outputs_.push_back(scan_points_xyziradt_no_overflow);
-      }
-      if (frame_id_ == test_vector_sampling_end_) {
-        RCLCPP_INFO(this->get_logger(), "start writing test vector");
-        writeInPackets(test_vector_input_file_, test_vector_inputs_);
-        writeOutPointClouds(test_vector_output_file_, test_vector_outputs_);
-        RCLCPP_INFO(this->get_logger(), "complete writing test vector");
-      }
-      frame_id_++;
     }
 
     // Add unpacked pointclouds
@@ -317,6 +300,31 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
     if (velodyne_points_ex_pub_->get_subscription_count() > 0) {
       auto ros_pc_msg_ptr = std::make_unique<sensor_msgs::msg::PointCloud2>();
       pcl::toROSMsg(*valid_points_xyziradt, *ros_pc_msg_ptr);
+
+      // extract valid points of no overflow
+      pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr valid_points_xyziradt_no_overflow;
+      valid_points_xyziradt_no_overflow =
+        extractValidPoints(scan_points_xyziradt_no_overflow.pc, data_->getMinRange(), data_->getMaxRange());
+      // Write input and output to yaml files
+      if (save_test_vector_) {
+        int frame_id = frame_id_ - test_vector_sampling_start_;
+        if (frame_id >= 0 &&
+            frame_id % test_vector_sampling_rate_ == test_vector_sampling_rate_ - 1) {
+          RCLCPP_INFO(this->get_logger(), "sampling test vector data");
+          test_vector_inputs_.push_back(scanMsg);
+          test_vector_outputs_.push_back(scan_points_xyziradt_no_overflow);
+          test_vector_extracted_outputs_.push_back(valid_points_xyziradt_no_overflow);
+        }
+        if (frame_id_ == test_vector_sampling_end_) {
+          RCLCPP_INFO(this->get_logger(), "start writing test vector");
+          writeInPackets(test_vector_input_file_, test_vector_inputs_);
+          writeOutPointClouds(test_vector_output_file_, test_vector_outputs_);
+          writeOutPointClouds(test_vector_extracted_output_file_, test_vector_extracted_outputs_);
+          RCLCPP_INFO(this->get_logger(), "complete writing test vector");
+        }
+        frame_id_++;
+      }
+
       velodyne_points_ex_pub_->publish(std::move(ros_pc_msg_ptr));
     }
   }
@@ -476,6 +484,35 @@ void Convert::writeOutPointClouds(
     emitter << YAML::Key << "clouds" << YAML::Value;
     emitter << YAML::BeginSeq;
     for (auto it = cloud->pc->begin(), e = cloud->pc->end(); it != e; ++it) {
+      emitter << YAML::Flow;
+      emitter << YAML::BeginSeq;
+      emitter << it->x << it->y << it->z << it->intensity << unsigned(it->return_type)
+        << it->ring << it->azimuth << it->distance << it->time_stamp;
+      emitter << YAML::EndSeq;
+    }
+    emitter << YAML::EndSeq;
+    emitter << YAML::EndMap;
+    emitter << YAML::EndSeq;
+  }
+  std::ofstream output_file(filename, std::ios::app);
+  output_file << emitter.c_str() << std::endl;
+  output_file.close();
+}
+
+/** @brief Write output pointclouds data to yaml file. */
+void Convert::writeOutPointClouds(
+  const std::string & filename,
+  const std::vector<pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr> & clouds)
+{
+  YAML::Emitter emitter;
+  uint32_t frame_id = 0;
+  for (auto cloud = clouds.begin(), end = clouds.end(); cloud != end; cloud++, frame_id++) {
+    emitter << YAML::BeginSeq;
+    emitter << YAML::BeginMap;
+    emitter << YAML::Key << "frame_id" << YAML::Value << frame_id;
+    emitter << YAML::Key << "clouds" << YAML::Value;
+    emitter << YAML::BeginSeq;
+    for (auto it = (*cloud)->points.begin(), e = (*cloud)->points.end(); it != e; ++it) {
       emitter << YAML::Flow;
       emitter << YAML::BeginSeq;
       emitter << it->x << it->y << it->z << it->intensity << unsigned(it->return_type)

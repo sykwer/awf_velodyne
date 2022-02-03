@@ -1,7 +1,7 @@
 # velodyne_pointcloudの機能追加
 feature/t4pb-12889-convert-logicブランチではvelodyne_pointcloudに対し、以下の機能を追加した。
 * VLP-16およびVLS-128のUDPパケット変換部をOpenMPを用いて実行する機能
-* UDPパケット変換部に対する入力パケット群・出力点群をテストベクタとしてファイルに出力する機能
+* UDPパケット変換部に対する入力パケット群・出力点群（距離判定による抽出前後）をテストベクタとしてファイルに出力する機能
 
 テストベクタのフォーマットに関しては、<https://github.com/tier4/hornet/blob/df/feature/t4pb-12889-convert-logic/kernel/sensing/test_vectors/README.md> を参照。
 
@@ -15,7 +15,7 @@ feature/t4pb-12889-convert-logicブランチではvelodyne_pointcloudに対し�
 
 |パラメータ名|型|説明|既定値|
 |:---|:---|:---|:---|
-|save_test_vector|bool|入力点群・出力点群をファイルへ書き込むかどうかを指定する。<br>True：入力点群と出力点群をyaml形式でファイルに書き込む。ファイル名はそれぞれ`[名前空間]_[node名]_input_vector.yaml`、`[名前空間]_[node名]_output_vector.yaml`。同名のファイルが存在する場合は上書きする。<br>False：ファイルへの書き込みを行わない。|False|
+|save_test_vector|bool|入力点群・出力点群をファイルへ書き込むかどうかを指定する。<br>True：入力点群と出力点群をyaml形式でファイルに書き込む。入力点群ファイル名は`[名前空間]_[node名]_input_vector.yaml`、距離判定による抽出前の出力点群ファイル名は`[名前空間]_[node名]_output_vector.yaml`、距離判定による抽出後の出力点群ファイル名は`[名前空間]_[node名]_extracted_output_vector.yaml`。同名のファイルが存在する場合は上書きする。<br>False：ファイルへの書き込みを行わない。|False|
 |test_vector_sampling_start|unsigned int|入力点群・出力点群のサンプリングを始めるインデックスを指定する（値は0始まり）。|0|
 |test_vector_sampling_rate|unsigned int|入力点群・出力点群のサンプリング頻度を指定する。|0|
 |test_vector_sampling_end|unsigned int|入力点群・出力点群のサンプリングを終わるインデックスを指定する（値は0始まり）。このパラメータで設定したインデックスの入力点群を受信した時、ファイルに書き込む。|0|
