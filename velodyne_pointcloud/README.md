@@ -3,8 +3,6 @@ feature/t4pb-12889-convert-logicブランチではvelodyne_pointcloudに対し�
 * VLP-16およびVLS-128のUDPパケット変換部をOpenMPを用いて実行する機能
 * UDPパケット変換部に対する入力パケット群・出力点群（距離判定による抽出前後）をテストベクタとしてファイルに出力する機能
 
-テストベクタのフォーマットに関しては、<https://github.com/tier4/hornet/blob/df/feature/t4pb-12889-convert-logic/kernel/sensing/test_vectors/README.md> を参照。
-
 ### 環境設定
 
 以下のノードに対する環境設定について記載する。
