@@ -64,7 +64,7 @@ feature/t4pb-12889-convert-logicブランチではvelodyne_pointcloudに対し�
 
     各要素が1バイトデータを表す配列。要素数は1206。
 
-### Example
+### 例
 
 ```
 - frame_id: 0
@@ -112,7 +112,7 @@ feature/t4pb-12889-convert-logicブランチではvelodyne_pointcloudに対し�
     * intensity
     * time_stamp
 
-### Example
+### 例
 
 ```
 - frame_id: 0
