@@ -174,7 +174,7 @@ void Interpolate::writePointCloudAndTwist(
       emitter << YAML::Flow;
       emitter << YAML::BeginSeq;
       emitter << it->x << it->y << it->z << it->intensity << unsigned(it->return_type)
-        << it->ring << it->azimuth << it->distance << (uint64_t)(it->time_stamp * 1000000000);
+        << it->ring << it->azimuth << it->distance << (uint64_t)(it->time_stamp * 1000 * 1000 * 1000);  // ns
       emitter << YAML::EndSeq;
     }
     emitter << YAML::EndSeq;
@@ -187,7 +187,7 @@ void Interpolate::writePointCloudAndTwist(
       emitter << YAML::BeginSeq;
       for (auto it = twist->begin(), end = twist->end(); it != end; it++) {
         emitter << YAML::BeginMap;
-        emitter << YAML::Key << "stamp" << YAML::Value << ((uint64_t)(rclcpp::Time(it->header.stamp, RCL_SYSTEM_TIME).seconds() * 1000000000));
+        emitter << YAML::Key << "stamp" << YAML::Value << ((uint64_t)(rclcpp::Time(it->header.stamp, RCL_SYSTEM_TIME).seconds() * 1000 * 1000* 1000));  //ns
         emitter << YAML::Key << "linear" << YAML::Value;
         emitter << YAML::Flow << YAML::BeginSeq << it->twist.linear.x << it->twist.linear.y << it->twist.linear.z << YAML::EndSeq;
         emitter << YAML::Key << "angular" << YAML::Value;
