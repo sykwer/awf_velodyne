@@ -228,16 +228,20 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
     data_->unpack(scanMsg->packets.back(), last_packet_points);
 
     // If it's a partial scan, put all points in the main pointcloud
+    int phase = (uint16_t)round(config_.scan_phase*100);
     bool keep_all = false;
-    if (scan_points_xyziradt.pc->points.back().azimuth < last_packet_points.pc->points.front().azimuth) {
+    uint16_t last_packet_last_phase = (36000 + (uint16_t)last_packet_points.pc->points.back().azimuth - phase) % 36000;
+    uint16_t body_packets_last_phase = (36000 + (uint16_t)scan_points_xyziradt.pc->points.back().azimuth - phase) % 36000;
+
+    if (body_packets_last_phase < last_packet_last_phase) {
       keep_all = true;
     }
 
-    int phase = (uint16_t)round(config_.scan_phase*100);
+    // If it's a split packet, distribute to overflow buffer or main pointcloud based on azimuth
     for (size_t i = 0; i < last_packet_points.pc->points.size(); ++i) {
-      uint16_t current_azimuth = (int)last_packet_points.pc->points[i].azimuth;
+      uint16_t current_azimuth = (uint16_t)last_packet_points.pc->points[i].azimuth;
       uint16_t phase_diff = (36000 + current_azimuth - phase) % 36000;
-      if (phase_diff > 18000 || keep_all) {
+      if ((phase_diff > 18000) || keep_all) {
         scan_points_xyziradt.pc->points.push_back(last_packet_points.pc->points[i]);
       }
       else {
@@ -247,19 +251,17 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
     last_packet_points.pc->points.clear();
     last_packet_points.pc->width = 0;
     last_packet_points.pc->height = 1;
-    _overflow_buffer.pc->height = 1;
     _overflow_buffer.pc->width = _overflow_buffer.pc->points.size();
+    _overflow_buffer.pc->height = 1;
 
     scan_points_xyziradt.pc->header = pcl_conversions::toPCL(scanMsg->header);
 
-    if (scan_points_xyziradt.pc->points.size() > 0)
-    {
+    if (scan_points_xyziradt.pc->points.size() > 0) {
       double first_point_timestamp = scan_points_xyziradt.pc->points.front().time_stamp;
       scan_points_xyziradt.pc->header.stamp =
         pcl_conversions::toPCL(rclcpp::Time(toChronoNanoSeconds(first_point_timestamp).count()));
     }
-    else
-    {
+    else {
       scan_points_xyziradt.pc->header.stamp =
         pcl_conversions::toPCL(scanMsg->packets[0].stamp);
     }
