@@ -45,6 +45,27 @@ inline std::chrono::nanoseconds toChronoNanoSeconds(const double seconds)
           std::chrono::duration<double>(seconds));
 }
 
+template<typename PointT>
+void Convert::initializePointcloud2(std::unique_ptr<sensor_msgs::msg::PointCloud2> &cloud) {
+  cloud->height = 1;
+  cloud->width = 0;
+  pcl_conversions::fromPCL(fields_cache_, cloud->fields);
+  cloud->point_step = sizeof(PointT);
+  cloud->row_step = cloud->width * sizeof(PointT);
+
+  cloud->data.reserve(sizeof(PointT) * MAX_POINTS_NUM);
+
+  if (mlock(&cloud->data[0], sizeof(PointT) * MAX_POINTS_NUM) < 0) {
+    perror("mlock error");
+    RCLCPP_ERROR(get_logger(), "mlock error");
+    exit(EXIT_FAILURE);
+  }
+
+  cloud->data.resize(sizeof(PointT) * MAX_POINTS_NUM);
+
+  cloud->is_dense = true;
+}
+
 /** @brief Constructor. */
 Convert::Convert(const rclcpp::NodeOptions & options)
 : Node("velodyne_convert_node", options),
@@ -53,6 +74,11 @@ Convert::Convert(const rclcpp::NodeOptions & options)
   base_link_frame_("base_link")
 {
   data_ = std::make_shared<velodyne_rawdata::RawData>(this);
+
+  using PointT = velodyne_pointcloud::PointXYZIRADT;
+  pcl::for_each_type<typename pcl::traits::fieldList<PointT>::type>(pcl::detail::FieldAdder<PointT>(fields_cache_));
+  next_output_ptr_ = std::make_unique<sensor_msgs::msg::PointCloud2>();
+  initializePointcloud2<PointT>(next_output_ptr_);
 
   RCLCPP_INFO(this->get_logger(), "This node is only tested for VLP16, VLP32C, and VLS128. Use other models at your own risk.");
 
@@ -147,10 +173,16 @@ Convert::Convert(const rclcpp::NodeOptions & options)
 
 
   // subscribe to VelodyneScan packets
+  /*
   velodyne_scan_ =
     this->create_subscription<velodyne_msgs::msg::VelodyneScan>(
     "velodyne_packets", rclcpp::SensorDataQoS(),
     std::bind(&Convert::processScan, this, std::placeholders::_1));
+  */
+  velodyne_scan_ =
+    this->create_subscription<velodyne_msgs::msg::VelodyneScan>(
+    "velodyne_packets", rclcpp::SensorDataQoS(),
+    std::bind(&Convert::fastProcessScan, this, std::placeholders::_1));
 }
 
 rcl_interfaces::msg::SetParametersResult Convert::paramCallback(const std::vector<rclcpp::Parameter> & p)
@@ -195,6 +227,68 @@ rcl_interfaces::msg::SetParametersResult Convert::paramCallback(const std::vecto
   result.reason = "success";
 
   return result;
+}
+
+void Convert::fastProcessScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scanMsg) {
+  RCLCPP_WARN(get_logger(), std::to_string(scanMsg->packets.size()).c_str());
+
+  if (velodyne_points_ex_pub_->get_subscription_count() == 0) return;
+
+  output_ptr_ = std::move(next_output_ptr_);
+  next_output_ptr_ = std::make_unique<sensor_msgs::msg::PointCloud2>();
+
+  initializePointcloud2<velodyne_pointcloud::PointXYZIRADT>(next_output_ptr_);
+
+  velodyne_pointcloud::PointcloudXYZIRADT dummy;
+  for (size_t i = 0; i < scanMsg->packets.size() - 1; i++) {
+    data_->unpack_vls128_internal(scanMsg->packets[i], output_ptr_, dummy);
+  }
+
+  float body_packets_last_azimuth;
+  size_t body_packets_points_num;
+  {
+    uint8_t *address = &output_ptr_->data[0] + output_ptr_->height * (output_ptr_->width - 1) * output_ptr_->point_step;
+    velodyne_pointcloud::PointXYZIRADT *point_address = (velodyne_pointcloud::PointXYZIRADT *) address;
+    body_packets_last_azimuth = point_address->azimuth;
+    body_packets_points_num = output_ptr_->width; // assumes height=1
+  }
+
+  data_->unpack_vls128_internal(scanMsg->packets.back(), output_ptr_, dummy);
+
+  float last_packet_last_azimuth;
+  size_t last_packet_points_num;
+  {
+    uint8_t *address = &output_ptr_->data[0] + output_ptr_->height * (output_ptr_->width - 1) * output_ptr_->point_step;
+    velodyne_pointcloud::PointXYZIRADT *point_address = (velodyne_pointcloud::PointXYZIRADT *) address;
+    last_packet_last_azimuth = point_address->azimuth;
+    last_packet_points_num = body_packets_points_num - output_ptr_->width;
+  }
+
+  int phase = (uint16_t) round(config_.scan_phase * 100);
+  uint16_t body_packets_last_phase = (36000 + (uint16_t) body_packets_last_azimuth - phase) % 36000;
+  uint16_t last_packet_last_phase = (36000 + (uint16_t) last_packet_last_azimuth - phase) % 36000;
+  bool keep_all = body_packets_last_phase < last_packet_last_phase;
+
+  // TODO: Implement the case for overflow points
+  if (!keep_all) RCLCPP_ERROR(get_logger(), "keep_all is false!!!!!!!!!!!!!!!");
+  RCLCPP_WARN(get_logger(), "body_packets_last_azimuth=%.6f, body_packets_points_num=%ld,  last_packet_last_azimuth=%.6f, last_packet_points_num=%ld",
+      body_packets_last_azimuth, body_packets_points_num, last_packet_last_azimuth, last_packet_points_num);
+
+  output_ptr_->data.resize(output_ptr_->width * output_ptr_->height * output_ptr_->point_step);
+
+  // oh..
+  auto pcl_header = pcl_conversions::toPCL(scanMsg->header);
+  double first_point_timestamp = ((velodyne_pointcloud::PointXYZIRADT *)&output_ptr_->data[0])->time_stamp;
+  pcl_header.stamp = pcl_conversions::toPCL(rclcpp::Time(toChronoNanoSeconds(first_point_timestamp).count()));
+  pcl_conversions::fromPCL(pcl_header, output_ptr_->header);
+
+  if (munlock(&output_ptr_->data[0], sizeof(velodyne_pointcloud::PointXYZIRADT) * MAX_POINTS_NUM) < 0) {
+    perror("munlock error");
+    RCLCPP_ERROR(get_logger(), "munlock error");
+    exit(EXIT_FAILURE);
+  }
+
+  velodyne_points_ex_pub_->publish(std::move(output_ptr_));
 }
 
 /** @brief Callback for raw scan messages. */

@@ -47,6 +47,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <velodyne_msgs/msg/velodyne_packet.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include <velodyne_pointcloud/calibration.h>
 #include <velodyne_pointcloud/point_types.h>
@@ -200,6 +201,11 @@ public:
   int getNumLasers() const;
   double getMaxRange() const;
   double getMinRange() const;
+
+  void unpack_vls128_internal(
+    const velodyne_msgs::msg::VelodynePacket &pkt,
+    std::unique_ptr<sensor_msgs::msg::PointCloud2> &output_ptr,
+    DataContainerBase & data);
 
 private:
   /** configuration parameters */

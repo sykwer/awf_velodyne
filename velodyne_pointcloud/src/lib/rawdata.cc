@@ -570,13 +570,21 @@ namespace velodyne_rawdata
     }
   }
 
+  void RawData::unpack_vls128(const velodyne_msgs::msg::VelodynePacket &pkt, DataContainerBase &data)
+  {
+    auto dummy = std::unique_ptr<sensor_msgs::msg::PointCloud2>(nullptr);
+    unpack_vls128_internal(pkt, dummy, data);
+  }
+
+
 /** @brief convert raw VLS128 packet to point cloud
  *
  *  @param pkt raw packet to unpack
  *  @param pc shared pointer to point cloud (points are appended)
  */
-  void RawData::unpack_vls128(
+  void RawData::unpack_vls128_internal(
     const velodyne_msgs::msg::VelodynePacket & pkt,
+    std::unique_ptr<sensor_msgs::msg::PointCloud2> &output_ptr,
     DataContainerBase & data)
   {
     const raw_packet_t * raw = (const raw_packet_t *) &pkt.data[0];
@@ -763,14 +771,43 @@ namespace velodyne_rawdata
                 default:
                   return_type = RETURN_TYPE::INVALID;
               }
-              if (is_invalid_distance) {
-                data.addPoint(
-                  x_coord, y_coord, z_coord, return_type, corrections.laser_ring,
-                  azimuth_corrected, 0, intensity, time_stamp);
+
+              if (output_ptr.get() != nullptr) {
+                // -- faster version --
+                // DIRTY: assumes specific point type
+                using PointT = velodyne_pointcloud::PointXYZIRADT;
+
+                // Corresponds to velodyne_pointcloud::extractValidPoints
+                if (distance < config_.min_range || distance > config_.max_range) continue;
+
+                uint8_t *address = &output_ptr->data[0] + output_ptr->height * output_ptr->width * output_ptr->point_step;
+                PointT *point_address = (PointT *) address;
+
+                // DIRTY: assumes height=1 in sensor_msgs/PointCloud2.msg
+                output_ptr->width++;
+                output_ptr->row_step += output_ptr->point_step;
+
+                point_address->x = x_coord;
+                point_address->y = y_coord;
+                point_address->z = z_coord;
+                point_address->return_type = return_type;
+                point_address->ring = corrections.laser_ring;
+                point_address->azimuth = azimuth_corrected;
+                point_address->distance = is_invalid_distance ? 0 : distance;
+                point_address->intensity = intensity;
+                point_address->time_stamp = time_stamp;
               } else {
-                data.addPoint(
-                  x_coord, y_coord, z_coord, return_type, corrections.laser_ring,
-                  azimuth_corrected, distance, intensity, time_stamp);
+                // -- original version --
+
+                if (is_invalid_distance) {
+                  data.addPoint(
+                    x_coord, y_coord, z_coord, return_type, corrections.laser_ring,
+                    azimuth_corrected, 0, intensity, time_stamp);
+                } else {
+                  data.addPoint(
+                    x_coord, y_coord, z_coord, return_type, corrections.laser_ring,
+                    azimuth_corrected, distance, intensity, time_stamp);
+                }
               }
             }
           }

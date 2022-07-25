@@ -50,6 +50,10 @@ public:
   ~Convert() {}
 
 private:
+  template<typename PointT>
+  void initializePointcloud2(std::unique_ptr<sensor_msgs::msg::PointCloud2> &cloud);
+
+  void fastProcessScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scanMsg);
 
   /** \brief Parameter service callback */
   rcl_interfaces::msg::SetParametersResult paramCallback(const std::vector<rclcpp::Parameter> & p);
@@ -92,6 +96,11 @@ private:
     bool sensor_timestamp;      ///< flag on whether to use sensor (GPS) time or ROS receive time
   } Config;
   Config config_;
+
+  const int MAX_POINTS_NUM = 250000;
+  std::vector<pcl::PCLPointField> fields_cache_;
+  std::unique_ptr<sensor_msgs::msg::PointCloud2> output_ptr_;
+  std::unique_ptr<sensor_msgs::msg::PointCloud2> next_output_ptr_;
 };
 
 }  // namespace velodyne_pointcloud
