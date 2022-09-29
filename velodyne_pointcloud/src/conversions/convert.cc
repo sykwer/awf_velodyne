@@ -52,18 +52,9 @@ void Convert::initializePointcloud2(std::unique_ptr<sensor_msgs::msg::PointCloud
   pcl_conversions::fromPCL(fields_cache_, cloud->fields);
   cloud->point_step = sizeof(PointT);
   cloud->row_step = cloud->width * sizeof(PointT);
-
-  cloud->data.reserve(sizeof(PointT) * MAX_POINTS_NUM);
-
-  if (mlock(&cloud->data[0], sizeof(PointT) * MAX_POINTS_NUM) < 0) {
-    perror("mlock error");
-    RCLCPP_ERROR(get_logger(), "mlock error");
-    exit(EXIT_FAILURE);
-  }
+  cloud->is_dense = true;
 
   cloud->data.resize(sizeof(PointT) * MAX_POINTS_NUM);
-
-  cloud->is_dense = true;
 }
 
 /** @brief Constructor. */
@@ -230,15 +221,15 @@ rcl_interfaces::msg::SetParametersResult Convert::paramCallback(const std::vecto
 }
 
 void Convert::fastProcessScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scanMsg) {
-  RCLCPP_WARN(get_logger(), std::to_string(scanMsg->packets.size()).c_str());
-
   if (velodyne_points_ex_pub_->get_subscription_count() == 0) return;
 
+  // [Section1] Initialize memory area for the output message
   output_ptr_ = std::move(next_output_ptr_);
   next_output_ptr_ = std::make_unique<sensor_msgs::msg::PointCloud2>();
 
   initializePointcloud2<velodyne_pointcloud::PointXYZIRADT>(next_output_ptr_);
 
+  // [Sedtion2] Main part
   velodyne_pointcloud::PointcloudXYZIRADT dummy;
   for (size_t i = 0; i < scanMsg->packets.size() - 1; i++) {
     data_->unpack_vls128_internal(scanMsg->packets[i], output_ptr_, dummy);
@@ -255,6 +246,7 @@ void Convert::fastProcessScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr 
 
   data_->unpack_vls128_internal(scanMsg->packets.back(), output_ptr_, dummy);
 
+  // [Section3] Others
   float last_packet_last_azimuth;
   size_t last_packet_points_num;
   {
@@ -281,12 +273,6 @@ void Convert::fastProcessScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr 
   double first_point_timestamp = ((velodyne_pointcloud::PointXYZIRADT *)&output_ptr_->data[0])->time_stamp;
   pcl_header.stamp = pcl_conversions::toPCL(rclcpp::Time(toChronoNanoSeconds(first_point_timestamp).count()));
   pcl_conversions::fromPCL(pcl_header, output_ptr_->header);
-
-  if (munlock(&output_ptr_->data[0], sizeof(velodyne_pointcloud::PointXYZIRADT) * MAX_POINTS_NUM) < 0) {
-    perror("munlock error");
-    RCLCPP_ERROR(get_logger(), "munlock error");
-    exit(EXIT_FAILURE);
-  }
 
   velodyne_points_ex_pub_->publish(std::move(output_ptr_));
 }
