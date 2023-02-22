@@ -20,6 +20,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <velodyne_pointcloud/output_builder.h>
 #include <velodyne_pointcloud/func.h>
 
 namespace velodyne_pointcloud
@@ -196,15 +197,23 @@ rcl_interfaces::msg::SetParametersResult Convert::paramCallback(const std::vecto
 /** @brief Callback for raw scan messages. */
 void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scanMsg)
 {
-  velodyne_pointcloud::PointcloudXYZIRADT scan_points_xyziradt;
-  if (
-    velodyne_points_pub_->get_subscription_count() > 0 ||
-    velodyne_points_ex_pub_->get_subscription_count() > 0) {
-    scan_points_xyziradt.pc->points.reserve(scanMsg->packets.size() * data_->scansPerPacket() + _overflow_buffer.pc->points.size());
+  velodyne_pointcloud::OutputBuilder output_builder(
+      scanMsg->packets.size() * data_->scansPerPacket() + _overflow_buffer.pc->points.size(), *scanMsg);
 
+  if (velodyne_points_pub_->get_subscription_count() > 0) {
+    output_builder.activate_xyzir(data_->getMinRange(), data_->getMaxRange());
+  }
+
+  if (velodyne_points_ex_pub_->get_subscription_count() > 0) {
+    output_builder.activate_xyziradt(data_->getMinRange(), data_->getMaxRange());
+  }
+
+  if (velodyne_points_pub_->get_subscription_count() > 0 || velodyne_points_ex_pub_->get_subscription_count() > 0) {
     // Add the overflow buffer points
     for (size_t i = 0; i < _overflow_buffer.pc->points.size(); ++i) {
-      scan_points_xyziradt.pc->points.push_back(_overflow_buffer.pc->points[i]);
+      auto &point = _overflow_buffer.pc->points[i];
+      output_builder.addPoint(point.x, point.y, point.z, point.return_type,
+          point.ring, point.azimuth, point.distance, point.intensity, point.time_stamp);
     }
     // Reset overflow buffer
     _overflow_buffer.pc->points.clear();
@@ -213,7 +222,7 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
 
     // Unpack up until the last packet, which contains points over-running the scan cut point
     for (size_t i = 0; i < scanMsg->packets.size() - 1; ++i) {
-      data_->unpack(scanMsg->packets[i], scan_points_xyziradt);
+      data_->unpack(scanMsg->packets[i], output_builder);
     }
 
     // Split the points of the last packet between pointcloud and overflow buffer
@@ -225,7 +234,7 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
     int phase = (uint16_t)round(config_.scan_phase*100);
     bool keep_all = false;
     uint16_t last_packet_last_phase = (36000 + (uint16_t)last_packet_points.pc->points.back().azimuth - phase) % 36000;
-    uint16_t body_packets_last_phase = (36000 + (uint16_t)scan_points_xyziradt.pc->points.back().azimuth - phase) % 36000;
+    uint16_t body_packets_last_phase = (36000 + (uint16_t)output_builder.last_azimuth - phase) % 36000;
 
     if (body_packets_last_phase < last_packet_last_phase) {
       keep_all = true;
@@ -236,52 +245,28 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
       uint16_t current_azimuth = (uint16_t)last_packet_points.pc->points[i].azimuth;
       uint16_t phase_diff = (36000 + current_azimuth - phase) % 36000;
       if ((phase_diff > 18000) || keep_all) {
-        scan_points_xyziradt.pc->points.push_back(last_packet_points.pc->points[i]);
-      }
-      else {
+        auto &point = last_packet_points.pc->points[i];
+        output_builder.addPoint(point.x, point.y, point.z, point.return_type,
+            point.ring, point.azimuth, point.distance, point.intensity, point.time_stamp);
+      } else {
         _overflow_buffer.pc->points.push_back(last_packet_points.pc->points[i]);
       }
     }
+
     last_packet_points.pc->points.clear();
     last_packet_points.pc->width = 0;
     last_packet_points.pc->height = 1;
     _overflow_buffer.pc->width = _overflow_buffer.pc->points.size();
     _overflow_buffer.pc->height = 1;
-
-    scan_points_xyziradt.pc->header = pcl_conversions::toPCL(scanMsg->header);
-
-    if (scan_points_xyziradt.pc->points.size() > 0) {
-      double first_point_timestamp = scan_points_xyziradt.pc->points.front().time_stamp;
-      scan_points_xyziradt.pc->header.stamp =
-        pcl_conversions::toPCL(rclcpp::Time(toChronoNanoSeconds(first_point_timestamp).count()));
-    }
-    else {
-      scan_points_xyziradt.pc->header.stamp =
-        pcl_conversions::toPCL(scanMsg->packets[0].stamp);
-    }
-
-    scan_points_xyziradt.pc->height = 1;
-    scan_points_xyziradt.pc->width = scan_points_xyziradt.pc->points.size();
   }
 
-  pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>::Ptr valid_points_xyziradt(
-    new pcl::PointCloud<velodyne_pointcloud::PointXYZIRADT>);
-  if (
-    velodyne_points_pub_->get_subscription_count() > 0 ||
-    velodyne_points_ex_pub_->get_subscription_count() > 0) {
-    valid_points_xyziradt =
-      extractValidPoints(scan_points_xyziradt.pc, data_->getMinRange(), data_->getMaxRange());
-    if (velodyne_points_pub_->get_subscription_count() > 0) {
-      const auto valid_points_xyzir = convert(valid_points_xyziradt);
-      auto ros_pc_msg_ptr = std::make_unique<sensor_msgs::msg::PointCloud2>();
-      pcl::toROSMsg(*valid_points_xyzir, *ros_pc_msg_ptr);
-      velodyne_points_pub_->publish(std::move(ros_pc_msg_ptr));
-    }
-    if (velodyne_points_ex_pub_->get_subscription_count() > 0) {
-      auto ros_pc_msg_ptr = std::make_unique<sensor_msgs::msg::PointCloud2>();
-      pcl::toROSMsg(*valid_points_xyziradt, *ros_pc_msg_ptr);
-      velodyne_points_ex_pub_->publish(std::move(ros_pc_msg_ptr));
-    }
+
+  if (output_builder.xyzir_is_activated() && velodyne_points_pub_->get_subscription_count() > 0) {
+    velodyne_points_pub_->publish(output_builder.move_xyzir_output());
+  }
+
+  if (output_builder.xyziradt_is_activated() && velodyne_points_ex_pub_->get_subscription_count() > 0) {
+    velodyne_points_ex_pub_->publish(output_builder.move_xyziradt_output());
   }
 
   if (marker_array_pub_->get_subscription_count() > 0) {
