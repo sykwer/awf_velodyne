@@ -6,6 +6,12 @@
 namespace velodyne_pointcloud {
 
 OutputBuilder::OutputBuilder(size_t output_max_points_num, const VelodyneScan & scan_msg) {
+  pcl::for_each_type<typename pcl::traits::fieldList<PointXYZIRADT>::type>(
+      pcl::detail::FieldAdder<PointXYZIRADT>(xyziradt_fields_));
+
+  pcl::for_each_type<typename pcl::traits::fieldList<PointXYZIR>::type>(
+      pcl::detail::FieldAdder<PointXYZIR>(xyzir_fields_));
+
   output_xyziradt_ = std::make_unique<sensor_msgs::msg::PointCloud2>();
   init_output_msg<PointXYZIRADT>(*output_xyziradt_, output_max_points_num, scan_msg);
 
@@ -27,13 +33,6 @@ OutputBuilder::OutputBuilder(size_t output_max_points_num, const VelodyneScan & 
   offsets_xyzir_.z_offset = output_xyzir_->fields[pcl::getFieldIndex(*output_xyzir_, "z")].offset;
   offsets_xyzir_.intensity_offset = output_xyzir_->fields[pcl::getFieldIndex(*output_xyzir_, "intensity")].offset;
   offsets_xyzir_.ring_offset = output_xyzir_->fields[pcl::getFieldIndex(*output_xyzir_, "ring")].offset;
-
-  pcl::for_each_type<typename pcl::traits::fieldList<PointXYZIRADT>::type>(
-      pcl::detail::FieldAdder<PointXYZIRADT>(xyziradt_fields_));
-
-  pcl::for_each_type<typename pcl::traits::fieldList<PointXYZIR>::type>(
-      pcl::detail::FieldAdder<PointXYZIR>(xyzir_fields_));
-
 }
 
 void OutputBuilder::activate_xyziradt(double min_range, double max_range) {
@@ -97,15 +96,15 @@ void OutputBuilder::addPoint(
     }
 
     if (min_range_ <= distance && distance <= max_range_) {
-      *reinterpret_cast<float *>(msg.data[sz + offsets_xyziradt_.x_offset]) = x;
-      *reinterpret_cast<float *>(msg.data[sz + offsets_xyziradt_.y_offset]) = y;
-      *reinterpret_cast<float *>(msg.data[sz + offsets_xyziradt_.z_offset]) = z;
-      *reinterpret_cast<float *>(msg.data[sz + offsets_xyziradt_.intensity_offset]) = intensity;
-      *reinterpret_cast<uint16_t *>(msg.data[sz + offsets_xyziradt_.ring_offset]) = ring;
-      *reinterpret_cast<float *>(msg.data[sz + offsets_xyziradt_.azimuth_offset]) = azimuth;
-      *reinterpret_cast<float *>(msg.data[sz + offsets_xyziradt_.distance_offset]) = distance;
-      *reinterpret_cast<uint8_t *>(msg.data[sz + offsets_xyziradt_.return_type_offset]) = return_type;
-      *reinterpret_cast<double *>(msg.data[sz + offsets_xyziradt_.time_stamp_offset]) = time_stamp;
+      *reinterpret_cast<float *>(&msg.data[sz + offsets_xyziradt_.x_offset]) = x;
+      *reinterpret_cast<float *>(&msg.data[sz + offsets_xyziradt_.y_offset]) = y;
+      *reinterpret_cast<float *>(&msg.data[sz + offsets_xyziradt_.z_offset]) = z;
+      *reinterpret_cast<float *>(&msg.data[sz + offsets_xyziradt_.intensity_offset]) = intensity;
+      *reinterpret_cast<uint16_t *>(&msg.data[sz + offsets_xyziradt_.ring_offset]) = ring;
+      *reinterpret_cast<float *>(&msg.data[sz + offsets_xyziradt_.azimuth_offset]) = azimuth;
+      *reinterpret_cast<float *>(&msg.data[sz + offsets_xyziradt_.distance_offset]) = distance;
+      *reinterpret_cast<uint8_t *>(&msg.data[sz + offsets_xyziradt_.return_type_offset]) = return_type;
+      *reinterpret_cast<double *>(&msg.data[sz + offsets_xyziradt_.time_stamp_offset]) = time_stamp;
     }
 
     output_xyziradt_data_size_ += msg.point_step;
@@ -122,11 +121,11 @@ void OutputBuilder::addPoint(
     }
 
     if (min_range_ <= distance && distance <= max_range_) {
-      *reinterpret_cast<float *>(msg.data[sz + offsets_xyziradt_.x_offset]) = x;
-      *reinterpret_cast<float *>(msg.data[sz + offsets_xyziradt_.y_offset]) = y;
-      *reinterpret_cast<float *>(msg.data[sz + offsets_xyziradt_.z_offset]) = z;
-      *reinterpret_cast<float *>(msg.data[sz + offsets_xyziradt_.intensity_offset]) = intensity;
-      *reinterpret_cast<uint16_t *>(msg.data[sz + offsets_xyziradt_.ring_offset]) = ring;
+      *reinterpret_cast<float *>(&msg.data[sz + offsets_xyziradt_.x_offset]) = x;
+      *reinterpret_cast<float *>(&msg.data[sz + offsets_xyziradt_.y_offset]) = y;
+      *reinterpret_cast<float *>(&msg.data[sz + offsets_xyziradt_.z_offset]) = z;
+      *reinterpret_cast<float *>(&msg.data[sz + offsets_xyziradt_.intensity_offset]) = intensity;
+      *reinterpret_cast<uint16_t *>(&msg.data[sz + offsets_xyziradt_.ring_offset]) = ring;
     }
 
     output_xyzir_data_size_ += msg.point_step;
