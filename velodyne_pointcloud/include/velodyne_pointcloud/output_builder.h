@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cfloat>
 #include <memory>
 
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -25,8 +26,8 @@ class OutputBuilder : public velodyne_rawdata::DataContainerBase {
   bool output_xyzir_moved_ = false;
   bool xyzir_activated_ = false;
 
-  double min_range_;
-  double max_range_;
+  double min_range_ = 0;
+  double max_range_ = DBL_MAX;
 
   struct OffsetsXYZIRADT {
     uint32_t x_offset;
@@ -50,6 +51,9 @@ class OutputBuilder : public velodyne_rawdata::DataContainerBase {
 
   std::vector<pcl::PCLPointField> xyziradt_fields_;
   std::vector<pcl::PCLPointField> xyzir_fields_;
+
+  // Only used for PointXYZIR
+  double first_timestamp_ = 0;
 
   template <class PointT>
   void init_output_msg(sensor_msgs::msg::PointCloud2 & msg, size_t output_max_points_num,
@@ -79,10 +83,9 @@ public:
   // Needed for velodyne_convert_node logic
   uint16_t last_azimuth;
 
-  OutputBuilder(size_t output_max_points_num, const VelodyneScan & scan_msg);
+  OutputBuilder(size_t output_max_points_num, const VelodyneScan & scan_msg, bool activate_xyziradt, bool activate_xyzir);
 
-  void activate_xyziradt(double min_range, double max_range);
-  void activate_xyzir(double min_range, double max_range);
+  void set_extract_range(double min_range, double max_range);
 
   bool xyziradt_is_activated();
   bool xyzir_is_activated();

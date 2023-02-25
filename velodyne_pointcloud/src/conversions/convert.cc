@@ -197,18 +197,18 @@ rcl_interfaces::msg::SetParametersResult Convert::paramCallback(const std::vecto
 /** @brief Callback for raw scan messages. */
 void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scanMsg)
 {
+
+
+  bool activate_xyziradt = velodyne_points_ex_pub_->get_subscription_count() == 0;
+  bool activate_xyzir = velodyne_points_pub_->get_subscription_count() > 0;
+
   velodyne_pointcloud::OutputBuilder output_builder(
-      scanMsg->packets.size() * data_->scansPerPacket() + _overflow_buffer.pc->points.size(), *scanMsg);
+      scanMsg->packets.size() * data_->scansPerPacket() + _overflow_buffer.pc->points.size(), *scanMsg,
+      activate_xyziradt, activate_xyzir);
 
-  if (velodyne_points_pub_->get_subscription_count() > 0) {
-    output_builder.activate_xyzir(data_->getMinRange(), data_->getMaxRange());
-  }
+  output_builder.set_extract_range(data_->getMinRange(), data_->getMaxRange());
 
-  if (velodyne_points_ex_pub_->get_subscription_count() > 0) {
-    output_builder.activate_xyziradt(data_->getMinRange(), data_->getMaxRange());
-  }
-
-  if (velodyne_points_pub_->get_subscription_count() > 0 || velodyne_points_ex_pub_->get_subscription_count() > 0) {
+  if (activate_xyziradt || activate_xyzir) {
     // Add the overflow buffer points
     for (size_t i = 0; i < _overflow_buffer.pc->points.size(); ++i) {
       auto &point = _overflow_buffer.pc->points[i];
@@ -261,11 +261,12 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
   }
 
 
-  if (output_builder.xyzir_is_activated() && velodyne_points_pub_->get_subscription_count() > 0) {
+  if (output_builder.xyzir_is_activated()) {
     velodyne_points_pub_->publish(output_builder.move_xyzir_output());
   }
 
-  if (output_builder.xyziradt_is_activated() && velodyne_points_ex_pub_->get_subscription_count() > 0) {
+  if (output_builder.xyziradt_is_activated()) {
+
     velodyne_points_ex_pub_->publish(output_builder.move_xyziradt_output());
   }
 
