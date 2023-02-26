@@ -197,9 +197,7 @@ rcl_interfaces::msg::SetParametersResult Convert::paramCallback(const std::vecto
 /** @brief Callback for raw scan messages. */
 void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scanMsg)
 {
-
-
-  bool activate_xyziradt = velodyne_points_ex_pub_->get_subscription_count() == 0;
+  bool activate_xyziradt = velodyne_points_ex_pub_->get_subscription_count() > 0;
   bool activate_xyzir = velodyne_points_pub_->get_subscription_count() > 0;
 
   velodyne_pointcloud::OutputBuilder output_builder(
@@ -266,7 +264,6 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
   }
 
   if (output_builder.xyziradt_is_activated()) {
-
     velodyne_points_ex_pub_->publish(output_builder.move_xyziradt_output());
   }
 
