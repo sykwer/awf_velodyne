@@ -62,8 +62,6 @@ private:
   rclcpp::Subscription<velodyne_msgs::msg::VelodyneScan>::SharedPtr velodyne_scan_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr velodyne_points_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr velodyne_points_ex_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr velodyne_points_invalid_near_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr velodyne_points_combined_ex_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_array_pub_;
 
   // tf2_ros::Buffer tf2_buffer_;
