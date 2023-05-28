@@ -260,11 +260,15 @@ void Convert::processScan(const velodyne_msgs::msg::VelodyneScan::SharedPtr scan
 
 
   if (output_builder.xyzir_is_activated()) {
-    velodyne_points_pub_->publish(output_builder.move_xyzir_output());
+    auto msg = output_builder.move_xyzir_output();
+    if (msg->data.size() == 0) msg->header.stamp = scanMsg->packets[0].stamp;
+    velodyne_points_pub_->publish(std::move(msg));
   }
 
   if (output_builder.xyziradt_is_activated()) {
-    velodyne_points_ex_pub_->publish(output_builder.move_xyziradt_output());
+    auto msg = output_builder.move_xyziradt_output();
+    if (msg->data.size() == 0) msg->header.stamp = scanMsg->packets[0].stamp;
+    velodyne_points_ex_pub_->publish(std::move(msg));
   }
 
   if (marker_array_pub_->get_subscription_count() > 0) {
